@@ -22,7 +22,14 @@ extension ObservabilitySystem {
     }
 
     public static var NOOP: ObservabilityScope {
-        ObservabilitySystem({ _, _ in }).topScope
+        ObservabilitySystem({ _, diagnostic in
+            switch diagnostic.severity {
+            case .warning, .error:
+                print("\(diagnostic)")
+            default:
+                break
+            }
+        }).topScope
     }
 }
 
