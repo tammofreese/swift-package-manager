@@ -3,6 +3,10 @@ Note: This is in reverse chronological order, so newer entries are added to the 
 Swift 5.7
 -----------
 
+* [SE-0292]
+
+  SwiftPM can now resolve deepndencies from a server compliant with the pacakge registry server API defined in SE-0292. 
+  
 * [SE-0339]
 
   Module aliases can now be defined in the package manifest to disambiguate between modules with the same name originating from different packages. 
