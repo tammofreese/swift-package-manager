@@ -562,18 +562,29 @@ public final class PackageBuilder {
             // No reference of this target in manifest, i.e. it has no dependencies.
             guard let target = self.manifest.targetMap[$0.name] else { return [] }
             // Collect the successors from declared dependencies.
-            var successors: [PotentialModule] = target.dependencies.compactMap({
-                switch $0 {
+            var successors: [PotentialModule] = target.dependencies.reduce(into: [], { successors, dependency in
+                switch dependency {
                 case .target(let name, _):
                     // Since we already checked above that all referenced targets
                     // has to present, we always expect this target to be present in
                     // potentialModules dictionary.
-                    return potentialModuleMap[name]!
-                case .product:
-                    return nil
+                    successors.append(potentialModuleMap[name]!)
+                case .product(let name, let package, _, _):
+                    // A product dependency in the same package means the module depends
+                    // on all targets in that product.
+                    if package == self.manifest.displayName,
+                       let product = self.manifest.products.first(where: { $0.name == name }) {
+                        let targetNames = Set(product.targets)
+                        let potentialModulesInProduct = potentialModuleMap
+                            .filter { targetNames.contains($0.0) }
+                            .map { $0.value }
+                        successors.append(contentsOf: potentialModulesInProduct)
+                    }
                 case .byName(let name, _):
                     // By name dependency may or may not be a target dependency.
-                    return potentialModuleMap[name]
+                    if let potentialModule = potentialModuleMap[name] {
+                        successors.append(potentialModule)
+                    }
                 }
             })
             // If there are plugin usages, consider them to be dependencies too.
