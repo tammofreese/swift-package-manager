@@ -434,7 +434,9 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                     // If this is a target dependency, we don't need to check anything.
                     break
                 case .product(_, let packageName, _, _):
-                    if manifest.packageDependency(referencedBy: targetDependency) == nil {
+                    // A target can depend on products in the same package, so we only check whether other packages exist.
+                    let isOtherPackage = packageName != manifest.displayName
+                    if isOtherPackage && manifest.packageDependency(referencedBy: targetDependency) == nil {
                         observabilityScope.emit(.unknownTargetPackageDependency(
                             packageName: packageName ?? "unknown package name",
                             targetName: target.name,
