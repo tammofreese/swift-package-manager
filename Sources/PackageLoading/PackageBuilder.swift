@@ -637,7 +637,7 @@ public final class PackageBuilder {
                         )
                     case .innerProduct(name: let name, let moduleAliases, let condition):
                         return .product(
-                            .init(name: name, package: PackageIdentity(path: self.packagePath).description, moduleAliases: moduleAliases),
+                            .init(name: name, package: self.identity.description, moduleAliases: moduleAliases),
                             conditions: buildConditions(from: condition)
                         )
                     case .byName(let name, let condition):

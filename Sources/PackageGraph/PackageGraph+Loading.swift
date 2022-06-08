@@ -429,15 +429,19 @@ private func createResolvedPackages(
                 return false
             })
 
-        // Get all the products from dependencies of this package, and all products from this package
-        let packageBuilders = packageBuilder.dependencies + [packageBuilder]
-        let productDependencies = packageBuilders
-            .flatMap({ (dependency: ResolvedPackageBuilder) -> [ResolvedProductBuilder] in
-                // Filter out synthesized products such as tests and implicit executables.
-                let explicit = Set(dependency.package.manifest.products.lazy.map({ $0.name }))
-                return dependency.products.filter({ explicit.contains($0.product.name) })
-            })
+        let mapToExplicitProducts = { (dependency: ResolvedPackageBuilder) -> [ResolvedProductBuilder] in
+            // Filter out synthesized products such as tests and implicit executables.
+            let explicit = Set(dependency.package.manifest.products.lazy.map({ $0.name }))
+            return dependency.products.filter({ explicit.contains($0.product.name) })
+        }
+
+        // Get all the products from dependencies of this package.
+        let productDependencies = packageBuilder.dependencies.flatMap(mapToExplicitProducts)
         let productDependencyMap = productDependencies.spm_createDictionary({ ($0.product.name, $0) })
+
+        // Get all the products in this package.
+        let innerProductDependencies = mapToExplicitProducts(packageBuilder)
+        let innerProductDependencyMap = innerProductDependencies.spm_createDictionary({ ($0.product.name, $0) })
 
         // Establish dependencies in each target.
         for targetBuilder in packageBuilder.targets {
@@ -449,8 +453,18 @@ private func createResolvedPackages(
 
             // Establish product dependencies.
             for case .product(let productRef, let conditions) in targetBuilder.target.dependencies {
-                // Find the product in this package's dependency products.
-                guard let product = productDependencyMap[productRef.name] else {
+
+                // To reference products from the same package, we require the package to be passed,
+                // that is no byName dependency, and if a package is passed in the manifest, it must be non-nil.
+                let productFromSamePackage: ResolvedProductBuilder?
+                if productRef.package == package.identity.description {
+                    productFromSamePackage = innerProductDependencyMap[productRef.name]
+                } else {
+                    productFromSamePackage = nil
+                }
+
+                // Find the product in this package, or in this package's dependency products.
+                guard let product = productFromSamePackage ?? productDependencyMap[productRef.name] else {
                     // Only emit a diagnostic if there are no other diagnostics.
                     // This avoids flooding the diagnostics with product not
                     // found errors when there are more important errors to
