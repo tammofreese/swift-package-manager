@@ -41,7 +41,7 @@ public final class Target {
 
     /// The different types of a target's dependency on another entity.
     public enum Dependency {
-        /// A denpendency on a target.
+        /// A dependency on a target.
         ///
         ///  - Parameters:
         ///    - name: The name of the target.
@@ -55,6 +55,11 @@ public final class Target {
         ///    - moduleAlias: The module aliases for targets in the product.
         ///    - condition: A condition that limits the application of the target dependency. For example, only apply a dependency for a specific platform.
         case productItem(name: String, package: String?, moduleAliases: [String: String]?, condition: TargetDependencyCondition?)
+        /// A dependency on a product in the same package.
+        ///
+        /// - Parameters:
+        ///    - name: The name of the product.
+        case innerProductItem(name: String, moduleAliases: [String: String]?, condition: TargetDependencyCondition?)
         /// A by-name dependency on either a target or a product.
         ///
         /// - Parameters:
@@ -992,7 +997,7 @@ extension Target.Dependency {
     ///   - name: The name of the product.
     ///   - package: The name of the package.
     /// - Returns: A `Target.Dependency` instance.
-@available(_PackageDescription, obsoleted: 5.2, message: "the 'package' argument is mandatory as of tools version 5.2")
+    @available(_PackageDescription, obsoleted: 5.2, message: "the 'package' argument is mandatory as of tools version 5.2")
     public static func product(name: String, package: String? = nil) -> Target.Dependency {
         return .productItem(name: name, package: package, moduleAliases: nil, condition: nil)
     }
@@ -1009,12 +1014,26 @@ extension Target.Dependency {
         return .productItem(name: name, package: package, moduleAliases: moduleAliases, condition: nil)
     }
 
+    /// Creates a dependency on a product from the same package.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the product.
+    /// - Returns: A `Target.Dependency` instance.
+    @available(_PackageDescription, introduced: 5.7)
+    public static func product(
+        name: String,
+        moduleAliases: [String: String]? = nil,
+        condition: TargetDependencyCondition? = nil
+    ) -> Target.Dependency {
+        return .innerProductItem(name: name, moduleAliases: moduleAliases, condition: condition)
+    }
+
     /// Creates a dependency that resolves to either a target or a product with the specified name.
     ///
     /// - Parameter name: The name of the dependency, either a target or a product.
     /// - Returns: A `Target.Dependency` instance.
     /// The Swift Package Manager creates the by-name dependency after it has loaded the package graph.
-@available(_PackageDescription, obsoleted: 5.3)
+    @available(_PackageDescription, obsoleted: 5.3)
     public static func byName(name: String) -> Target.Dependency {
         return .byNameItem(name: name, condition: nil)
     }
@@ -1025,7 +1044,7 @@ extension Target.Dependency {
     ///   - name: The name of the product.
     ///   - package: The name of the package.
     /// - Returns: A `Target.Dependency` instance.
-@available(_PackageDescription, introduced: 5.2, obsoleted: 5.3)
+    @available(_PackageDescription, introduced: 5.2, obsoleted: 5.3)
     public static func product(
         name: String,
         package: String
@@ -1041,7 +1060,7 @@ extension Target.Dependency {
     ///     dependency. For example, only apply a dependency for a specific
     ///     platform.
     /// - Returns: A `Target.Dependency` instance.
-@available(_PackageDescription, introduced: 5.3)
+    @available(_PackageDescription, introduced: 5.3)
     public static func target(name: String, condition: TargetDependencyCondition? = nil) -> Target.Dependency {
         return .targetItem(name: name, condition: condition)
     }
@@ -1055,7 +1074,7 @@ extension Target.Dependency {
     ///     dependency. For example, only apply a dependency for a specific
     ///     platform.
     /// - Returns: A `Target.Dependency` instance.
-@_disfavoredOverload
+    @_disfavoredOverload
     @available(_PackageDescription, introduced: 5.3, obsoleted: 5.7)
     public static func product(
         name: String,
@@ -1074,7 +1093,7 @@ extension Target.Dependency {
     ///   - condition: A condition that limits the application of the target dependency. For example, only apply a
     ///       dependency for a specific platform.
     /// - Returns: A `Target.Dependency` instance.
-@available(_PackageDescription, introduced: 5.7)
+    @available(_PackageDescription, introduced: 5.7)
     public static func product(
       name: String,
       package: String,
@@ -1096,7 +1115,7 @@ extension Target.Dependency {
     ///     dependency. For example, only apply a dependency for a specific
     ///     platform.
     /// - Returns: A `Target.Dependency` instance.
-@available(_PackageDescription, introduced: 5.3)
+    @available(_PackageDescription, introduced: 5.3)
     public static func byName(name: String, condition: TargetDependencyCondition? = nil) -> Target.Dependency {
         return .byNameItem(name: name, condition: condition)
     }

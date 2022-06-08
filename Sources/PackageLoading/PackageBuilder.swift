@@ -569,11 +569,12 @@ public final class PackageBuilder {
                     // has to present, we always expect this target to be present in
                     // potentialModules dictionary.
                     successors.append(potentialModuleMap[name]!)
-                case .product(let name, let package, _, _):
+                case .product:
+                    break
+                case .innerProduct(let name, _, _):
                     // A product dependency in the same package means the module depends
                     // on all targets in that product.
-                    if package == self.manifest.displayName,
-                       let product = self.manifest.products.first(where: { $0.name == name }) {
+                    if let product = self.manifest.products.first(where: { $0.name == name }) {
                         let targetNames = Set(product.targets)
                         let potentialModulesInProduct = potentialModuleMap
                             .filter { targetNames.contains($0.0) }
@@ -632,6 +633,11 @@ public final class PackageBuilder {
                         try validateModuleAliases(moduleAliases)
                         return .product(
                             .init(name: name, package: package, moduleAliases: moduleAliases),
+                            conditions: buildConditions(from: condition)
+                        )
+                    case .innerProduct(name: let name, let moduleAliases, let condition):
+                        return .product(
+                            .init(name: name, package: PackageIdentity(path: self.packagePath).description, moduleAliases: moduleAliases),
                             conditions: buildConditions(from: condition)
                         )
                     case .byName(let name, let condition):
@@ -1308,7 +1314,7 @@ private extension Manifest {
                 switch $0 {
                 case .target(let name, _):
                     return name
-                case .byName, .product:
+                case .byName, .product, .innerProduct:
                     return nil
                 }
             })

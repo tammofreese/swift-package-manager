@@ -333,6 +333,7 @@ extension Target.Dependency: Encodable {
     private enum Kind: String, Codable {
         case target
         case product
+        case innerProduct = "innerproduct"
         case byName = "byname"
     }
 
@@ -356,6 +357,11 @@ extension Target.Dependency: Encodable {
             try container.encode(Kind.product, forKey: .type)
             try container.encode(name, forKey: .name)
             try container.encode(package, forKey: .package)
+            try container.encode(moduleAliases, forKey: .moduleAliases)
+            try container.encode(condition, forKey: .condition)
+        case .innerProductItem(let name, let moduleAliases, let condition):
+            try container.encode(Kind.innerProduct, forKey: .type)
+            try container.encode(name, forKey: .name)
             try container.encode(moduleAliases, forKey: .moduleAliases)
             try container.encode(condition, forKey: .condition)
         case .byNameItem(let name, let condition):

@@ -354,6 +354,10 @@ public final class Manifest {
             } else { // < 5.2
                 registry.unknown.insert(product)
             }
+        case .innerProduct(let product, _, _):
+            if !products.contains(where: { $0.name == product}) {
+                registry.unknown.insert(product)
+            }
         case .byName(let product, _):
             if toolsVersion < .v5_2 {
                 // A by‐name entry might be a product from anywhere.

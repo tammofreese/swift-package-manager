@@ -623,6 +623,11 @@ extension TargetDescription.Dependency {
             let moduleAliases: [String: String]? = try? json.get("moduleAliases")
             self = .product(name: name, package: json.get("package"), moduleAliases: moduleAliases, condition: condition)
 
+        case "innerproduct":
+            let name = try json.get(String.self, forKey: "name")
+            let moduleAliases: [String: String]? = try? json.get("moduleAliases")
+            self = .innerProduct(name: name, moduleAliases: moduleAliases, condition: condition)
+
         case "byname":
             self = try .byName(name: json.get("name"), condition: condition)
 

@@ -434,15 +434,15 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                     // If this is a target dependency, we don't need to check anything.
                     break
                 case .product(_, let packageName, _, _):
-                    // A target can depend on products in the same package, so we only check whether other packages exist.
-                    let isOtherPackage = packageName != manifest.displayName
-                    if isOtherPackage && manifest.packageDependency(referencedBy: targetDependency) == nil {
+                    if manifest.packageDependency(referencedBy: targetDependency) == nil {
                         observabilityScope.emit(.unknownTargetPackageDependency(
                             packageName: packageName ?? "unknown package name",
                             targetName: target.name,
                             validPackages: manifest.dependencies.map { $0.nameForTargetDependencyResolutionOnly }
                         ))
                     }
+                case .innerProduct:
+                    break
                 case .byName(let name, _):
                     // Don't diagnose root manifests so we can emit a better diagnostic during package loading.
                     if !manifest.packageKind.isRoot &&

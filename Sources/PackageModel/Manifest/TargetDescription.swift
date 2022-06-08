@@ -27,6 +27,7 @@ public struct TargetDescription: Equatable, Encodable {
     public enum Dependency: Equatable {
         case target(name: String, condition: PackageConditionDescription?)
         case product(name: String, package: String?, moduleAliases: [String: String]? = nil, condition: PackageConditionDescription?)
+        case innerProduct(name: String, moduleAliases: [String: String]? = nil, condition: PackageConditionDescription?)
         case byName(name: String, condition: PackageConditionDescription?)
 
         public static func target(name: String) -> Dependency {
@@ -211,7 +212,7 @@ public struct TargetDescription: Equatable, Encodable {
 
 extension TargetDescription.Dependency: Codable {
     private enum CodingKeys: String, CodingKey {
-        case target, product, byName
+        case target, product, innerProduct, byName
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -227,6 +228,11 @@ extension TargetDescription.Dependency: Codable {
             try unkeyedContainer.encode(a2)
             try unkeyedContainer.encode(a3)
             try unkeyedContainer.encode(a4)
+        case let .innerProduct(a1, a2, a3):
+            var unkeyedContainer = container.nestedUnkeyedContainer(forKey: .innerProduct)
+            try unkeyedContainer.encode(a1)
+            try unkeyedContainer.encode(a2)
+            try unkeyedContainer.encode(a3)
         case let .byName(a1, a2):
             var unkeyedContainer = container.nestedUnkeyedContainer(forKey: .byName)
             try unkeyedContainer.encode(a1)
@@ -252,6 +258,12 @@ extension TargetDescription.Dependency: Codable {
             let a3 = try unkeyedValues.decode([String: String].self)
             let a4 = try unkeyedValues.decodeIfPresent(PackageConditionDescription.self)
             self = .product(name: a1, package: a2, moduleAliases: a3, condition: a4)
+        case .innerProduct:
+            var unkeyedValues = try values.nestedUnkeyedContainer(forKey: key)
+            let a1 = try unkeyedValues.decode(String.self)
+            let a2 = try unkeyedValues.decode([String: String].self)
+            let a3 = try unkeyedValues.decodeIfPresent(PackageConditionDescription.self)
+            self = .innerProduct(name: a1, moduleAliases: a2, condition: a3)
         case .byName:
             var unkeyedValues = try values.nestedUnkeyedContainer(forKey: key)
             let a1 = try unkeyedValues.decode(String.self)
