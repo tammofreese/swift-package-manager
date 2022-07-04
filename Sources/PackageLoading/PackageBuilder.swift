@@ -571,7 +571,7 @@ public final class PackageBuilder {
                     successors.append(potentialModuleMap[name]!)
                 case .product:
                     break
-                case .innerProduct(let name, _, _):
+                case .innerProduct(let name):
                     // A product dependency in the same package means the module depends
                     // on all targets in that product.
                     if let product = self.manifest.products.first(where: { $0.name == name }) {
@@ -635,10 +635,10 @@ public final class PackageBuilder {
                             .init(name: name, package: package, moduleAliases: moduleAliases),
                             conditions: buildConditions(from: condition)
                         )
-                    case .innerProduct(name: let name, let moduleAliases, let condition):
+                    case .innerProduct(name: let name):
                         return .product(
-                            .init(name: name, package: self.identity.description, moduleAliases: moduleAliases),
-                            conditions: buildConditions(from: condition)
+                            .init(name: name, package: self.identity.description),
+                            conditions: []
                         )
                     case .byName(let name, let condition):
                         // We don't create an object for targets which have no sources.

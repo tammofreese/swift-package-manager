@@ -59,7 +59,7 @@ public final class Target {
         ///
         /// - Parameters:
         ///    - name: The name of the product.
-        case innerProductItem(name: String, moduleAliases: [String: String]?, condition: TargetDependencyCondition?)
+        case innerProductItem(name: String)
         /// A by-name dependency on either a target or a product.
         ///
         /// - Parameters:
@@ -1009,7 +1009,6 @@ extension Target.Dependency {
     ///   - moduleAliases: The module aliases for targets in the product.
     ///   - package: The name of the package.
     /// - Returns: A `Target.Dependency` instance.
-    @_disfavoredOverload
     @available(_PackageDescription, introduced: 5.7)
     public static func product(name: String, package: String? = nil, moduleAliases: [String: String]? = nil) -> Target.Dependency {
         return .productItem(name: name, package: package, moduleAliases: moduleAliases, condition: nil)
@@ -1023,10 +1022,9 @@ extension Target.Dependency {
     @available(_PackageDescription, introduced: 5.7)
     public static func product(
         name: String,
-        moduleAliases: [String: String]? = nil,
         condition: TargetDependencyCondition? = nil
     ) -> Target.Dependency {
-        return .innerProductItem(name: name, moduleAliases: moduleAliases, condition: condition)
+        return .innerProductItem(name: name)
     }
 
     /// Creates a dependency that resolves to either a target or a product with the specified name.

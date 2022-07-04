@@ -354,7 +354,7 @@ public final class Manifest {
             } else { // < 5.2
                 registry.unknown.insert(product)
             }
-        case .innerProduct(let product, _, _):
+        case .innerProduct(let product):
             if !products.contains(where: { $0.name == product}) {
                 registry.unknown.insert(product)
             }

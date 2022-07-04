@@ -359,11 +359,9 @@ extension Target.Dependency: Encodable {
             try container.encode(package, forKey: .package)
             try container.encode(moduleAliases, forKey: .moduleAliases)
             try container.encode(condition, forKey: .condition)
-        case .innerProductItem(let name, let moduleAliases, let condition):
+        case .innerProductItem(let name):
             try container.encode(Kind.innerProduct, forKey: .type)
             try container.encode(name, forKey: .name)
-            try container.encode(moduleAliases, forKey: .moduleAliases)
-            try container.encode(condition, forKey: .condition)
         case .byNameItem(let name, let condition):
             try container.encode(Kind.byName, forKey: .type)
             try container.encode(name, forKey: .name)

@@ -169,7 +169,10 @@ class ModuleAliasTracker {
                 }
             }
         }
-        guard let children = parentToChildIDs[package] else { return }
+        guard var children = parentToChildIDs[package] else { return }
+
+        // Prevent looping forever as a target in a package can reference a product from the same package.
+        children.removeAll { $0 == package }
         for childID in children {
             propagate(package: childID, aliasBuffer: &aliasBuffer)
         }

@@ -201,7 +201,7 @@ public final class InitPackage {
                 param += """
                     targets: [
                         // Targets are the basic building blocks of a package. A target can define a module or a test suite.
-                        // Targets can depend on other targets \(InitPackage.newPackageToolsVersion >= .v5_7 ? " or products":"") in this package, and on products in packages this package depends on.
+                        // Targets can depend on other targets or products in this package, and on products in packages this package depends on.
 
                 """
                 if packageType == .executable {
@@ -219,7 +219,7 @@ public final class InitPackage {
                             dependencies: []),
                         .testTarget(
                             name: "\(pkgname)Tests",
-                            dependencies: [\(InitPackage.newPackageToolsVersion >= .v5_7 ? ".product(name: \"\(pkgname)\")": "\"\(pkgname)\"")]),
+                            dependencies: [.product(name: "\(pkgname)")]),
                     ]
                 """
 
