@@ -625,7 +625,7 @@ extension LLBuildManifestBuilder {
                 manifest.addShellCmd(
                     name: displayName + "-" + ByteString(encodingAsUTF8: uniquedName).sha256Checksum,
                     description: displayName,
-                    inputs: [.file(execPath)] + command.inputFiles.map{ .file($0) },
+                    inputs: command.inputFiles.map{ .file($0) },
                     outputs: command.outputFiles.map{ .file($0) },
                     arguments: commandLine,
                     environment: command.configuration.environment,
@@ -853,14 +853,17 @@ extension LLBuildManifestBuilder {
     private func createProductCommand(_ buildProduct: ProductBuildDescription) throws {
         let cmdName = try buildProduct.product.getCommandName(config: buildConfig)
 
-        // Create archive tool for static library and shell tool for rest of the products.
-        if buildProduct.product.type == .library(.static) {
-            manifest.addArchiveCmd(
+        switch buildProduct.product.type {
+        case .library(.static):
+            manifest.addShellCmd(
                 name: cmdName,
+                description: "Archiving \(buildProduct.binary.prettyPath())",
                 inputs: buildProduct.objects.map(Node.file),
-                outputs: [.file(buildProduct.binary)]
+                outputs: [.file(buildProduct.binary)],
+                arguments: try buildProduct.archiveArguments()
             )
-        } else {
+
+        default:
             let inputs = buildProduct.objects + buildProduct.dylibs.map({ $0.binary })
 
             manifest.addShellCmd(

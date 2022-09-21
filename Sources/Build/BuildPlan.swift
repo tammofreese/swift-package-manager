@@ -378,11 +378,20 @@ public final class ClangTargetBuildDescription {
             args += buildParameters.indexStoreArguments(for: target)
         }
 
-        // Enable Clang module flags, if appropriate. We enable them except in these cases:
-        // 1. on Darwin when compiling for C++, because C++ modules are disabled on Apple-built Clang releases
-        // 2. on Windows when compiling for any language, because of issues with the Windows SDK
-        // 3. on Android when compiling for any language, because of issues with the Android SDK
-        let enableModules = !(buildParameters.triple.isDarwin() && isCXX) && !buildParameters.triple.isWindows() && !buildParameters.triple.isAndroid()
+        // Enable Clang module flags, if appropriate.
+        let enableModules: Bool
+        if toolsVersion < .vNext {
+          // For version < 5.8, we enable them except in these cases:
+          // 1. on Darwin when compiling for C++, because C++ modules are disabled on Apple-built Clang releases
+          // 2. on Windows when compiling for any language, because of issues with the Windows SDK
+          // 3. on Android when compiling for any language, because of issues with the Android SDK
+          enableModules = !(buildParameters.triple.isDarwin() && isCXX) && !buildParameters.triple.isWindows() && !buildParameters.triple.isAndroid()
+        } else {
+          // For version >= 5.8, we disable them when compiling for C++ regardless of platforms, see:
+          // https://github.com/llvm/llvm-project/issues/55980 for clang frontend crash when module
+          // enabled for C++ on c++17 standard and above.
+          enableModules = !isCXX && !buildParameters.triple.isWindows() && !buildParameters.triple.isAndroid()
+        }
 
         if enableModules {
             // Using modules currently conflicts with the Windows and Android SDKs.
@@ -530,6 +539,8 @@ public final class ClangTargetBuildDescription {
 
 /// Target description for a Swift target.
 public final class SwiftTargetBuildDescription {
+    /// The package this target belongs to.
+    public let package: ResolvedPackage
 
     /// The target described by this target.
     public let target: ResolvedTarget
@@ -624,25 +635,56 @@ public final class SwiftTargetBuildDescription {
     public let isTestDiscoveryTarget: Bool
 
     /// True if this module needs to be parsed as a library based on the target type and the configuration
-    /// of the source code (for example because it has a single source file whose name isn't "main.swift").
-    /// This deactivates heuristics in the Swift compiler that treats single-file modules and source files
-    /// named "main.swift" specially w.r.t. whether they can have an entry point.
-    ///
-    /// See https://bugs.swift.org/browse/SR-14488 for discussion about improvements so that SwiftPM can
-    /// convey the intent to build an executable module to the compiler regardless of the number of files
-    /// in the module or their names.
+    /// of the source code
     var needsToBeParsedAsLibrary: Bool {
-        switch target.type {
+        switch self.target.type {
         case .library, .test:
             return true
-        case .executable:
-            guard toolsVersion >= .v5_5 else { return false }
-            let sources = self.sources
-            return sources.count == 1 && sources.first?.basename != "main.swift"
+        case .executable, .snippet:
+            // This deactivates heuristics in the Swift compiler that treats single-file modules and source files
+            // named "main.swift" specially w.r.t. whether they can have an entry point.
+            //
+            // See https://bugs.swift.org/browse/SR-14488 for discussion about improvements so that SwiftPM can
+            // convey the intent to build an executable module to the compiler regardless of the number of files
+            // in the module or their names.
+            if self.toolsVersion < .v5_5 || self.sources.count != 1 {
+                return false
+            }
+            // looking into the file content to see if it is using the @main annotation which requires parse-as-library
+            return (try? self.containsAtMain(fileSystem: self.fileSystem, path: self.sources[0])) ?? false
         default:
             return false
         }
     }
+
+    // looking into the file content to see if it is using the @main annotation
+    // this is not bullet-proof since theoretically the file can contain the @main string for other reasons
+    // but it is the closest to accurate we can do at this point
+    func containsAtMain(fileSystem: FileSystem, path: AbsolutePath) throws -> Bool {
+        let content: String = try self.fileSystem.readFileContents(path)
+        let lines = content.split(separator: "\n").compactMap { String($0).spm_chuzzle() }
+
+        var multilineComment = false
+        for line in lines {
+            if line.hasPrefix("//") {
+                continue
+            }
+            if line.hasPrefix("/*") {
+                multilineComment = true
+            }
+            if line.hasSuffix("*/") {
+                multilineComment = false
+            }
+            if multilineComment {
+                continue
+            }
+            if line.hasPrefix("@main") {
+                return true
+            }
+        }
+        return false
+    }
+
 
     /// The filesystem to operate on.
     let fileSystem: FileSystem
@@ -661,6 +703,7 @@ public final class SwiftTargetBuildDescription {
 
     /// Create a new target description with target and build parameters.
     init(
+        package: ResolvedPackage,
         target: ResolvedTarget,
         toolsVersion: ToolsVersion,
         additionalFileRules: [FileRuleDescription] = [],
@@ -675,6 +718,7 @@ public final class SwiftTargetBuildDescription {
         guard target.underlyingTarget is SwiftTarget else {
             throw InternalError("underlying target type mismatch \(target)")
         }
+        self.package = package
         self.target = target
         self.toolsVersion = toolsVersion
         self.buildParameters = buildParameters
@@ -750,7 +794,7 @@ public final class SwiftTargetBuildDescription {
         import class Foundation.Bundle
 
         extension Foundation.Bundle {
-            static var module: Bundle = {
+            static let module: Bundle = {
                 let mainPath = \(mainPathSubstitution)
                 let buildPath = "\(bundlePath.pathString.asSwiftStringLiteralConstant)"
 
@@ -872,26 +916,40 @@ public final class SwiftTargetBuildDescription {
         args += buildParameters.toolchain.extraSwiftCFlags
         // User arguments (from -Xswiftc) should follow generated arguments to allow user overrides
         args += buildParameters.swiftCompilerFlags
+
+        // suppress warnings if the package is remote
+        if self.package.isRemote {
+            args += ["-suppress-warnings"]
+            // suppress-warnings and warnings-as-errors are mutually exclusive
+            if let index = args.firstIndex(of: "-warnings-as-errors") {
+                args.remove(at: index)
+            }
+        }
+
         return args
     }
 
-    public func emitCommandLine() throws -> [String] {
+    /// When `scanInvocation` argument is set to `true`, omit the side-effect producing arguments
+    /// such as emitting a module or supplementary outputs.
+    public func emitCommandLine(scanInvocation: Bool = false) throws -> [String] {
         var result: [String] = []
         result.append(buildParameters.toolchain.swiftCompilerPath.pathString)
 
         result.append("-module-name")
         result.append(target.c99name)
 
-        result.append("-emit-dependencies")
+        if !scanInvocation {
+            result.append("-emit-dependencies")
 
-        // FIXME: Do we always have a module?
-        result.append("-emit-module")
-        result.append("-emit-module-path")
-        result.append(moduleOutputPath.pathString)
+            // FIXME: Do we always have a module?
+            result.append("-emit-module")
+            result.append("-emit-module-path")
+            result.append(moduleOutputPath.pathString)
 
-        result.append("-output-file-map")
-        // FIXME: Eliminate side effect.
-        result.append(try writeOutputFileMap().pathString)
+            result.append("-output-file-map")
+            // FIXME: Eliminate side effect.
+            result.append(try writeOutputFileMap().pathString)
+        }
 
         if buildParameters.useWholeModuleOptimization {
             result.append("-whole-module-optimization")
@@ -1276,10 +1334,32 @@ public final class ProductBuildDescription {
                 return ["-Xlinker", "-dead_strip"]
             } else if buildParameters.triple.isWindows() {
                 return ["-Xlinker", "/OPT:REF"]
+            } else if buildParameters.triple.arch == .wasm32 {
+                // FIXME: wasm-ld strips data segments referenced through __start/__stop symbols
+                // during GC, and it removes Swift metadata sections like swift5_protocols
+                // We should add support of SHF_GNU_RETAIN-like flag for __attribute__((retain))
+                // to LLVM and wasm-ld
+                // This workaround is required for not only WASI but also all WebAssembly archs
+                // using wasm-ld (e.g. wasm32-unknown-unknown). So this branch is conditioned by
+                // arch == .wasm32
+                return []
             } else {
                 return ["-Xlinker", "--gc-sections"]
             }
         }
+    }
+
+    /// The arguments to the librarian to create a static library.
+    public func archiveArguments() throws -> [String] {
+        let librarian = buildParameters.toolchain.librarianPath.pathString
+        let triple = buildParameters.triple
+        if triple.isWindows(), librarian.hasSuffix("link") || librarian.hasSuffix("link.exe") {
+            return [librarian, "/LIB", "/OUT:\(binary.pathString)", "@\(linkFileListPath.pathString)"]
+        }
+        if triple.isDarwin(), librarian.hasSuffix("libtool") {
+            return [librarian, "-o", binary.pathString, "@\(linkFileListPath.pathString)"]
+        }
+        return [librarian, "crs", binary.pathString, "@\(linkFileListPath.pathString)"]
     }
 
     /// The arguments to link and create this product.
@@ -1608,6 +1688,9 @@ public class BuildPlan {
         var generateRedundant = generate
         var result: [(ResolvedProduct, SwiftTargetBuildDescription)] = []
         for testProduct in graph.allProducts where testProduct.type == .test {
+            guard let package = graph.package(for: testProduct) else {
+                throw InternalError("package not found for \(testProduct)")
+            }
             generateRedundant = generateRedundant && nil == testProduct.testManifestTarget
             // if test manifest exists, prefer that over test detection,
             // this is designed as an escape hatch when test discovery is not appropriate
@@ -1615,6 +1698,7 @@ public class BuildPlan {
             let toolsVersion = graph.package(for: testProduct)?.manifest.toolsVersion ?? .v5_5
             if let testManifestTarget = testProduct.testManifestTarget, !generate {
                 let desc = try SwiftTargetBuildDescription(
+                    package: package,
                     target: testManifestTarget,
                     toolsVersion: toolsVersion,
                     buildParameters: buildParameters,
@@ -1651,6 +1735,7 @@ public class BuildPlan {
                 )
 
                 let target = try SwiftTargetBuildDescription(
+                    package: package,
                     target: testManifestTarget,
                     toolsVersion: toolsVersion,
                     buildParameters: buildParameters,
@@ -1716,7 +1801,11 @@ public class BuildPlan {
 
             switch target.underlyingTarget {
             case is SwiftTarget:
+                guard let package = graph.package(for: target) else {
+                    throw InternalError("package not found for \(target)")
+                }
                 targetMap[target] = try .swift(SwiftTargetBuildDescription(
+                    package: package,
                     target: target,
                     toolsVersion: toolsVersion,
                     additionalFileRules: additionalFileRules,
@@ -2152,7 +2241,7 @@ public class BuildPlan {
     /// importing the modules in the package graph.
     public func createREPLArguments() -> [String] {
         let buildPath = buildParameters.buildPath.pathString
-        var arguments = ["-I" + buildPath, "-L" + buildPath]
+        var arguments = ["repl", "-I" + buildPath, "-L" + buildPath]
 
         // Link the special REPL product that contains all of the library targets.
         let replProductName = graph.rootPackages[0].identity.description + Product.replProductSuffix
@@ -2303,8 +2392,19 @@ private func generateResourceInfoPlist(
     return true
 }
 
-fileprivate extension TSCUtility.Triple {
-    var isSupportingStaticStdlib: Bool {
+extension TSCUtility.Triple {
+    fileprivate var isSupportingStaticStdlib: Bool {
         isLinux() || arch == .wasm32
+    }
+}
+
+extension ResolvedPackage {
+    fileprivate var isRemote: Bool {
+        switch self.underlyingPackage.manifest.packageKind {
+        case .registry, .remoteSourceControl, .localSourceControl:
+            return true
+        case .root, .fileSystem:
+            return false
+        }
     }
 }

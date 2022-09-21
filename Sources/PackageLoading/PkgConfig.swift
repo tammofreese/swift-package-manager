@@ -271,7 +271,7 @@ internal struct PkgConfigParser {
                         \(pcFile)
                         """)
                 }
-            } else {
+            } else if !arg.isEmpty {
                 // Otherwise it is a dependency.
                 deps.append(arg)
             }
@@ -392,7 +392,7 @@ internal struct PCFileFinder {
     private init(pkgConfigPath: String) {
         if PCFileFinder.pkgConfigPaths == nil {
             do {
-                let searchPaths = try Process.checkNonZeroExit(args:
+                let searchPaths = try TSCBasic.Process.checkNonZeroExit(args:
                     pkgConfigPath, "--variable", "pc_path", "pkg-config"
                 ).spm_chomp()
 

@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import PackageLoading
 import PackageModel
 import SPMTestSupport
 import TSCBasic
@@ -53,8 +54,9 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
             """
 
         let observability = ObservabilitySystem.makeForTesting()
-        let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+        let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
         XCTAssertFalse(observability.diagnostics.hasErrors)
+        XCTAssertNoDiagnostics(validationDiagnostics)
 
         let deps = Dictionary(uniqueKeysWithValues: manifest.dependencies.map{ ($0.identity.description, $0) })
         XCTAssertEqual(deps["foo1"], .remoteSourceControl(identity: .plain("foo1"), deprecatedName: "foo1", url: URL(string: "http://localhost/foo1")!, requirement: .range("1.1.1" ..< "2.0.0")))
@@ -89,8 +91,9 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
             """
 
         let observability = ObservabilitySystem.makeForTesting()
-        let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+        let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
         XCTAssertNoDiagnostics(observability.diagnostics)
+        XCTAssertNoDiagnostics(validationDiagnostics)
 
         XCTAssertEqual(manifest.targets[0].type, .plugin)
         XCTAssertEqual(manifest.targets[0].pluginCapability, .buildTool)
@@ -114,8 +117,9 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
             """
 
         let observability = ObservabilitySystem.makeForTesting()
-        let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+        let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
         XCTAssertNoDiagnostics(observability.diagnostics)
+        XCTAssertNoDiagnostics(validationDiagnostics)
 
         XCTAssertEqual(manifest.targets[0].type, .plugin)
         XCTAssertEqual(manifest.targets[0].pluginCapability, .buildTool)
@@ -138,8 +142,9 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
                 """
 
             let observability = ObservabilitySystem.makeForTesting()
-            let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+            let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
             XCTAssertNoDiagnostics(observability.diagnostics)
+            XCTAssertNoDiagnostics(validationDiagnostics)
 
             XCTAssertEqual(manifest.platforms, [
                 PlatformDescription(name: "customos", version: "1.0"),
@@ -160,13 +165,35 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
                 """
 
             let observability = ObservabilitySystem.makeForTesting()
-            let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+            let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
             XCTAssertNoDiagnostics(observability.diagnostics)
+            XCTAssertNoDiagnostics(validationDiagnostics)
 
             XCTAssertEqual(manifest.platforms, [
                 PlatformDescription(name: "customos", version: "1.0"),
                 PlatformDescription(name: "anothercustomos", version: "2.3"),
             ])
+        }
+
+        // Invalid custom platform version.
+        do {
+            let content = """
+                import PackageDescription
+                let package = Package(
+                   name: "Foo",
+                   platforms: [
+                       .custom("customos", versionString: "xx"),
+                   ]
+                )
+                """
+
+            let observability = ObservabilitySystem.makeForTesting()
+            do {
+                _  = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
+                XCTFail("manifest loading unexpectedly did not throw an error")
+            } catch ManifestParseError.runtimeManifestErrors(let errors) {
+                XCTAssertEqual(errors, ["invalid custom platform version xx; xx should be a positive integer"])
+            }
         }
     }
     
@@ -178,7 +205,9 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
             """
 
         let observability = ObservabilitySystem.makeForTesting()
-        let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+        let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
+        XCTAssertNoDiagnostics(observability.diagnostics)
+        XCTAssertNoDiagnostics(validationDiagnostics)
 
         let name = parsedManifest.parentDirectory?.pathString ?? ""
         XCTAssertEqual(manifest.displayName, name)
@@ -198,7 +227,9 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
             """
 
         let observability = ObservabilitySystem.makeForTesting()
-        let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+        let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
+        XCTAssertNoDiagnostics(observability.diagnostics)
+        XCTAssertNoDiagnostics(validationDiagnostics)
 
         let name = parsedManifest.components?.last ?? ""
         let swiftFiles = manifest.displayName.split(separator: ",").map(String.init)
@@ -223,8 +254,9 @@ class PackageDescription5_6LoadingTests: PackageDescriptionLoadingTests {
             """
 
         let observability = ObservabilitySystem.makeForTesting()
-        let manifest = try loadManifest(content, observabilityScope: observability.topScope)
+        let (manifest, validationDiagnostics) = try loadAndValidateManifest(content, observabilityScope: observability.topScope)
         XCTAssertNoDiagnostics(observability.diagnostics)
+        XCTAssertNoDiagnostics(validationDiagnostics)
 
         XCTAssertEqual(manifest.targets[0].type, .plugin)
         XCTAssertEqual(manifest.targets[0].pluginCapability, .command(intent: .custom(verb: "mycmd", description: "helpful description of mycmd"), permissions: [.writeToPackageDirectory(reason: "YOLO")]))

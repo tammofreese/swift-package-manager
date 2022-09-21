@@ -83,7 +83,7 @@ extension ModuleError: CustomStringConvertible {
         switch self {
         case .duplicateModule(let name, let packages):
             let packages = packages.joined(separator: "', '")
-            return "multiple targets named '\(name)' in: '\(packages)'"
+            return "multiple targets named '\(name)' in: '\(packages)'; consider using the `moduleAliases` parameter in manifest to provide unique names"
         case .moduleNotFound(let target, let type):
             let folderName = (type == .test) ? "Tests" : (type == .plugin) ? "Plugins" : "Sources"
             return "Source files for target \(target) should be located under '\(folderName)/\(target)', or a custom sources path can be set with the 'path' property in Package.swift"
@@ -557,6 +557,17 @@ public final class PackageBuilder {
             throw ModuleError.moduleNotFound(missingModuleName, type)
         }
 
+        let products = Dictionary(manifest.products.map({ ($0.name, $0) }), uniquingKeysWith: { $1 })
+
+        // If there happens to be a plugin product with the right name in the same package, we want to use that automatically.
+        func pluginTargetName(for productName: String) -> String? {
+            if let product = products[productName], product.type == .plugin {
+                return product.targets.first
+            } else {
+                return nil
+            }
+        }
+
         let potentialModuleMap = Dictionary(potentialModules.map({ ($0.name, $0) }), uniquingKeysWith: { $1 })
         let successors: (PotentialModule) -> [PotentialModule] = {
             // No reference of this target in manifest, i.e. it has no dependencies.
@@ -592,8 +603,16 @@ public final class PackageBuilder {
             if let pluginUsages = target.pluginUsages {
                 successors += pluginUsages.compactMap({
                     switch $0 {
-                    case .plugin(let name, let package):
-                        return (package == nil) ? potentialModuleMap[name] : nil
+                    case .plugin(_, .some(_)):
+                        return nil
+                    case .plugin(let name, nil):
+                        if let potentialModule = potentialModuleMap[name] {
+                            return potentialModule
+                        } else if let targetName = pluginTargetName(for: name), let potentialModule = potentialModuleMap[targetName] {
+                            return potentialModule
+                        } else {
+                            return nil
+                        }
                     }
                 })
             }
@@ -666,8 +685,15 @@ public final class PackageBuilder {
                             return .product(Target.ProductReference(name: name, package: package), conditions: [])
                         }
                         else {
-                            guard let target = targets[name] else { return nil }
-                            return .target(target, conditions: [])
+                            if let target = targets[name] {
+                                return .target(target, conditions: [])
+                            } else if let targetName = pluginTargetName(for: name), let target = targets[targetName] {
+                                return .target(target, conditions: [])
+                            } else {
+                                self.observabilityScope.emit(.pluginNotFound(name: name))
+                                return nil
+                            }
+
                         }
                     }
                 }
@@ -748,7 +774,7 @@ public final class PackageBuilder {
         }
 
         // Check for duplicate target dependencies
-        dependencies.spm_findDuplicateElements(by: \.nameAndType).map(\.[0].name).forEach {
+        dependencies.filter{$0.product?.moduleAliases == nil}.spm_findDuplicateElements(by: \.nameAndType).map(\.[0].name).forEach {
             self.observabilityScope.emit(.duplicateTargetDependency(dependency: $0, target: potentialModule.name, package: self.identity.description))
         }
 
@@ -1087,7 +1113,7 @@ public final class PackageBuilder {
         // If enabled, create one test product for each test target.
         if self.shouldCreateMultipleTestProducts {
             for testTarget in testModules {
-                let product = try Product(name: testTarget.name, type: .test, targets: [testTarget])
+                let product = try Product(package: self.identity, name: testTarget.name, type: .test, targets: [testTarget])
                 append(product)
             }
         } else if !testModules.isEmpty {
@@ -1100,7 +1126,7 @@ public final class PackageBuilder {
             let productName = self.manifest.displayName + "PackageTests"
             let testManifest = try self.findTestManifest(in: testModules)
 
-            let product = try Product(name: productName, type: .test, targets: testModules, testManifest: testManifest)
+            let product = try Product(package: self.identity, name: productName, type: .test, targets: testModules, testManifest: testManifest)
             append(product)
         }
 
@@ -1157,7 +1183,7 @@ public final class PackageBuilder {
                 }
             }
 
-            try append(Product(name: product.name, type: product.type, targets: targets))
+            try append(Product(package: self.identity, name: product.name, type: product.type, targets: targets))
         }
 
         // Add implicit executables - for root packages and for dependency plugins.
@@ -1201,7 +1227,7 @@ public final class PackageBuilder {
             } else {
                 if self.manifest.packageKind.isRoot || implicitPlugInExecutables.contains(target.name) {
                     // Generate an implicit product for the executable target
-                    let product = try Product(name: target.name, type: .executable, targets: [target])
+                    let product = try Product(package: self.identity, name: target.name, type: .executable, targets: [target])
                     append(product)
                 }
             }
@@ -1215,6 +1241,7 @@ public final class PackageBuilder {
                 self.observabilityScope.emit(.noLibraryTargetsForREPL)
             } else {
                 let replProduct = try Product(
+                    package: self.identity,
                     name: self.identity.description + Product.replProductSuffix,
                     type: .library(.dynamic),
                     targets: libraryTargets
@@ -1226,7 +1253,7 @@ public final class PackageBuilder {
         // Create implicit snippet products
         try targets
             .filter { $0.type == .snippet }
-            .map { try Product(name: $0.name, type: .snippet, targets: [$0]) }
+            .map { try Product(package: self.identity, name: $0.name, type: .snippet, targets: [$0]) }
             .forEach(append)
 
         return products.map{ $0.item }
@@ -1237,6 +1264,13 @@ public final class PackageBuilder {
         guard pluginTargets.isEmpty else {
             self.observabilityScope.emit(.nonPluginProductWithPluginTargets(product: product.name, type: product.type, pluginTargets: pluginTargets.map{ $0.name }))
             return false
+        }
+        if manifest.toolsVersion >= .v5_7 {
+            let executableTargets = targets.filter { $0.type == .executable }
+            guard executableTargets.isEmpty else {
+                self.observabilityScope.emit(.libraryProductWithExecutableTarget(product: product.name, executableTargets: executableTargets.map{ $0.name }))
+                return false
+            }
         }
         return true
     }
@@ -1378,7 +1412,7 @@ extension PackageBuilder {
             return []
         }
 
-        return try walk(snippetsDirectory)
+        return try walk(snippetsDirectory, fileSystem: self.fileSystem)
             .filter { fileSystem.isFile($0) && $0.extension == "swift" }
             .map { sourceFile in
                 let name = sourceFile.basenameWithoutExt

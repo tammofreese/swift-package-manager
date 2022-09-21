@@ -98,7 +98,6 @@ final class TestDiscoveryCommand: CustomLLBuildCommand {
             let className = iterator.key
             stream <<< indent(8) <<< "testCase(\(className).__allTests__\(className)),\n"
         }
-
         stream <<< """
             ]
         }
@@ -113,9 +112,7 @@ final class TestDiscoveryCommand: CustomLLBuildCommand {
         let store = try IndexStore.open(store: index, api: api)
 
         // FIXME: We can speed this up by having one llbuild command per object file.
-        let tests = try tool.inputs.flatMap {
-            try store.listTests(inObjectFile: AbsolutePath($0.name))
-        }
+        let tests = try store.listTests(in: tool.inputs.map{ AbsolutePath($0.name) })
 
         let outputs = tool.outputs.compactMap{ try? AbsolutePath(validating: $0.name) }
         let testsByModule = Dictionary(grouping: tests, by: { $0.module.spm_mangledToC99ExtendedIdentifier() })
@@ -151,6 +148,8 @@ final class TestDiscoveryCommand: CustomLLBuildCommand {
             throw InternalError("main output (\(LLBuildManifest.TestDiscoveryTool.mainFileName)) not found")
         }
 
+        let testsKeyword = tests.isEmpty ? "let" : "var"
+
         // Write the main file.
         let stream = try LocalFileOutputByteStream(mainFile)
 
@@ -160,7 +159,7 @@ final class TestDiscoveryCommand: CustomLLBuildCommand {
         stream <<< "@available(*, deprecated, message: \"Not actually deprecated. Marked as deprecated to allow inclusion of deprecated tests (which test deprecated functionality) without warnings\")" <<< "\n"
         stream <<< "struct Runner" <<< " {" <<< "\n"
         stream <<< indent(4) <<< "static func main()" <<< " {" <<< "\n"
-        stream <<< indent(8) <<< "var tests = [XCTestCaseEntry]()" <<< "\n"
+        stream <<< indent(8) <<< "\(testsKeyword) tests = [XCTestCaseEntry]()" <<< "\n"
         for module in testsByModule.keys {
             stream <<< indent(8) <<< "tests += __\(module)__allTests()" <<< "\n"
         }
@@ -206,7 +205,12 @@ private final class InProcessTool: Tool {
         self.type = type
     }
 
+    @available(*, deprecated, message: "Use the overload that returns an Optional")
     func createCommand(_ name: String) -> ExternalCommand {
+        return type.init(self.context)
+    }
+
+    func createCommand(_ name: String) -> ExternalCommand? {
         return type.init(self.context)
     }
 }
@@ -215,6 +219,7 @@ private final class InProcessTool: Tool {
 public struct BuildDescription: Codable {
     public typealias CommandName = String
     public typealias TargetName = String
+    public typealias CommandLineFlag = String
 
     /// The Swift compiler invocation targets.
     let swiftCommands: [BuildManifest.CmdName : SwiftCompilerTool]
@@ -227,6 +232,19 @@ public struct BuildDescription: Codable {
 
     /// The map of copy commands.
     let copyCommands: [BuildManifest.CmdName: LLBuildManifest.CopyTool]
+
+    /// A flag that inidcates this build should perform a check for whether targets only import
+    /// their explicitly-declared dependencies
+    let explicitTargetDependencyImportCheckingMode: BuildParameters.TargetDependencyImportCheckingMode
+
+    /// Every target's set of dependencies.
+    let targetDependencyMap: [TargetName: [TargetName]]
+
+    /// A full swift driver command-line invocation used to dependency-scan a given Swift target
+    let swiftTargetScanArgs: [TargetName: [CommandLineFlag]]
+
+    /// A set of all targets with generated source
+    let generatedSourceTargetSet: Set<TargetName>
 
     /// The built test products.
     public let builtTestProducts: [BuiltTestProduct]
@@ -246,6 +264,28 @@ public struct BuildDescription: Codable {
         self.swiftFrontendCommands = swiftFrontendCommands
         self.testDiscoveryCommands = testDiscoveryCommands
         self.copyCommands = copyCommands
+        self.explicitTargetDependencyImportCheckingMode = plan.buildParameters.explicitTargetDependencyImportCheckingMode
+        self.targetDependencyMap = try plan.targets.reduce(into: [TargetName: [TargetName]]()) {
+            let deps = try $1.target.recursiveTargetDependencies().map { $0.c99name }
+            $0[$1.target.c99name] = deps
+        }
+        var targetCommandLines: [TargetName: [CommandLineFlag]] = [:]
+        var generatedSourceTargets: [TargetName] = []
+        for (target, description) in plan.targetMap {
+            guard case .swift(let desc) = description else {
+                continue
+            }
+            targetCommandLines[target.c99name] =
+                try desc.emitCommandLine(scanInvocation: true) + ["-driver-use-frontend-path",
+                                                                  plan.buildParameters.toolchain.swiftCompilerPath.pathString]
+            if desc.isTestDiscoveryTarget {
+                generatedSourceTargets.append(target.c99name)
+            }
+        }
+        generatedSourceTargets.append(contentsOf: plan.graph.allTargets.filter {$0.type == .plugin}
+                                                                       .map { $0.c99name })
+        self.swiftTargetScanArgs = targetCommandLines
+        self.generatedSourceTargetSet = Set(generatedSourceTargets)
         self.builtTestProducts = plan.buildProducts.filter{ $0.product.type == .test }.map { desc in
             return BuiltTestProduct(
                 productName: desc.product.name,
@@ -620,22 +660,30 @@ final class BuildOperationBuildSystemDelegateHandler: LLBuildBuildSystemDelegate
 
     /// Invoked right before running an action taken before building.
     func preparationStepStarted(_ name: String) {
-        self.outputStream <<< name <<< "\n"
-        self.outputStream.flush()
+        queue.async {
+            self.taskTracker.buildPreparationStepStarted(name)
+            self.updateProgress()
+        }
     }
 
     /// Invoked when an action taken before building emits output.
     func preparationStepHadOutput(_ name: String, output: String) {
         queue.async {
             self.progressAnimation.clear()
-            self.outputStream <<< output.spm_chomp() <<< "\n"
-            self.outputStream.flush()
+            if self.logLevel.isVerbose {
+                self.outputStream <<< output.spm_chomp() <<< "\n"
+                self.outputStream.flush()
+            }
         }
     }
 
     /// Invoked right after running an action taken before building. The result
     /// indicates whether the action succeeded, failed, or was cancelled.
     func preparationStepFinished(_ name: String, result: CommandResult) {
+        queue.async {
+            self.taskTracker.buildPreparationStepFinished(name)
+            self.updateProgress()
+        }
     }
 
     // MARK: SwiftCompilerOutputParserDelegate
@@ -806,6 +854,15 @@ fileprivate struct CommandTaskTracker {
         }
 
         return nil
+    }
+    
+    mutating func buildPreparationStepStarted(_ name: String) {
+        self.totalCount += 1
+    }
+
+    mutating func buildPreparationStepFinished(_ name: String) {
+        latestFinishedText = name
+        self.finishedCount += 1
     }
 }
 
