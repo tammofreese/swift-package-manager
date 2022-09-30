@@ -1020,10 +1020,7 @@ extension Target.Dependency {
     ///   - name: The name of the product.
     /// - Returns: A `Target.Dependency` instance.
     @available(_PackageDescription, introduced: 5.7)
-    public static func product(
-        name: String,
-        condition: TargetDependencyCondition? = nil
-    ) -> Target.Dependency {
+    public static func product(name: String) -> Target.Dependency {
         return .innerProductItem(name: name)
     }
 
