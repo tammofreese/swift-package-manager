@@ -42,7 +42,7 @@ class PackageDescription5_2LoadingTests: PackageDescriptionLoadingTests {
         let observability = ObservabilitySystem.makeForTesting()
         XCTAssertThrowsError(try loadAndValidateManifest(content, observabilityScope: observability.topScope), "expected error") { error in
             if case ManifestParseError.invalidManifestFormat(let error, _) = error {
-                XCTAssert(error.contains("error: \'product(name:package:)\' is unavailable: the 'package' argument is mandatory as of tools version 5.2"))
+                XCTAssert(error.contains("error: \'product(name:)\' is unavailable"))
             } else {
                 XCTFail("unexpected error: \(error)")
             }
