@@ -219,7 +219,7 @@ public final class InitPackage {
                             dependencies: []),
                         .testTarget(
                             name: "\(pkgname)Tests",
-                            dependencies: [.product(name: "\(pkgname)")]),
+                            dependencies: ["\(pkgname)"]),
                     ]
                 """
 
