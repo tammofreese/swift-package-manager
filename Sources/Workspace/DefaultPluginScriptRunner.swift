@@ -17,6 +17,7 @@ import PackageModel
 import SPMBuildCore
 import TSCBasic
 
+import struct TSCUtility.SerializedDiagnostics
 import struct TSCUtility.Triple
 
 /// A plugin script runner that compiles the plugin source files as an executable binary for the host platform, and invokes it as a subprocess.
@@ -121,6 +122,8 @@ public struct DefaultPluginScriptRunner: PluginScriptRunner, Cancellable {
 
         // We use the toolchain's Swift compiler for compiling the plugin.
         var commandLine = [self.toolchain.swiftCompilerPathForManifests.pathString]
+        
+        observabilityScope.emit(debug: "Using compiler \(self.toolchain.swiftCompilerPathForManifests.pathString)")
 
         // Get access to the path containing the PackagePlugin module and library.
         let pluginLibraryPath = self.toolchain.swiftPMLibrariesLocation.pluginLibraryPath
@@ -165,6 +168,8 @@ public struct DefaultPluginScriptRunner: PluginScriptRunner, Cancellable {
 
         // Add any extra flags required as indicated by the ManifestLoader.
         commandLine += self.toolchain.swiftCompilerFlags
+
+        commandLine.append("-g")
 
         // Add the Swift language version implied by the package tools version.
         commandLine += ["-swift-version", toolsVersion.swiftLanguageVersion.rawValue]
@@ -386,9 +391,10 @@ public struct DefaultPluginScriptRunner: PluginScriptRunner, Cancellable {
         guard let sdkRoot = foundPath?.spm_chomp(), !sdkRoot.isEmpty else {
             return nil
         }
-        let path = AbsolutePath(sdkRoot)
-        sdkRootPath = path
-        self.sdkRootCache.put(path)
+        if let path = try? AbsolutePath(validating: sdkRoot) {
+            sdkRootPath = path
+            self.sdkRootCache.put(path)
+        }
         #endif
 
         return sdkRootPath
@@ -416,7 +422,13 @@ public struct DefaultPluginScriptRunner: PluginScriptRunner, Cancellable {
 
         // Optionally wrap the command in a sandbox, which places some limits on what it can do. In particular, it blocks network access and restricts the paths to which the plugin can make file system changes. It does allow writing to temporary directories.
         if self.enableSandbox {
-            command = Sandbox.apply(command: command, strictness: .writableTemporaryDirectory, writableDirectories: writableDirectories + [self.cacheDir], readOnlyDirectories: readOnlyDirectories)
+            do {
+                command = try Sandbox.apply(command: command, strictness: .writableTemporaryDirectory, writableDirectories: writableDirectories + [self.cacheDir], readOnlyDirectories: readOnlyDirectories)
+            } catch {
+                return callbackQueue.async {
+                    completion(.failure(error))
+                }
+            }
         }
 
         // Create and configure a Process. We set the working directory to the cache directory, so that relative paths end up there.
@@ -516,7 +528,10 @@ public struct DefaultPluginScriptRunner: PluginScriptRunner, Cancellable {
             }
 
             // Read and pass on any remaining messages from the plugin.
-            stdoutPipe.fileHandleForReading.readabilityHandler?(stdoutPipe.fileHandleForReading)
+            let handle = stdoutPipe.fileHandleForReading
+            if let handler = handle.readabilityHandler {
+                handler(handle)
+            }
 
             // Call the completion block with a result that depends on how the process ended.
             callbackQueue.async {

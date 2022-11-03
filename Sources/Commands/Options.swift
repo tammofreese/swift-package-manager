@@ -15,9 +15,7 @@ import TSCBasic
 import PackageFingerprint
 import PackageModel
 import SPMBuildCore
-import Build
 
-import struct TSCUtility.BuildFlags
 import struct TSCUtility.Triple
 
 struct GlobalOptions: ParsableArguments {
@@ -279,10 +277,11 @@ struct BuildOptions: ParsableArguments {
 
     var buildFlags: BuildFlags {
         BuildFlags(
-            xcc: cCompilerFlags,
-            xcxx: cxxCompilerFlags,
-            xswiftc: swiftCompilerFlags,
-            xlinker: linkerFlags)
+            cCompilerFlags: cCompilerFlags,
+            cxxCompilerFlags: cxxCompilerFlags,
+            swiftCompilerFlags: swiftCompilerFlags,
+            linkerFlags: linkerFlags
+        )
     }
 
     /// The compilation destination’s target triple.
@@ -346,9 +345,9 @@ struct BuildOptions: ParsableArguments {
 
     /// The build system to use.
     @Option(name: .customLong("build-system"))
-    var _buildSystem: BuildSystemKind = .native
+    var _buildSystem: BuildSystemProvider.Kind = .native
 
-    var buildSystem: BuildSystemKind {
+    var buildSystem: BuildSystemProvider.Kind {
         #if os(macOS)
         // Force the Xcode build system if we want to build more than one arch.
         return archs.count > 1 ? .xcode : self._buildSystem
@@ -375,11 +374,6 @@ struct BuildOptions: ParsableArguments {
         case autoIndexStore
         case enableIndexStore
         case disableIndexStore
-    }
-
-    enum BuildSystemKind: String, ExpressibleByArgument, CaseIterable {
-        case native
-        case xcode
     }
 
     enum TargetDependencyImportCheckingMode : String, Codable, ExpressibleByArgument {
@@ -416,7 +410,10 @@ extension BuildConfiguration: ExpressibleByArgument {
 extension AbsolutePath: ExpressibleByArgument {
     public init?(argument: String) {
         if let cwd = localFileSystem.currentWorkingDirectory {
-            self.init(argument, relativeTo: cwd)
+            guard let path = try? AbsolutePath(validating: argument, relativeTo: cwd) else {
+                return nil
+            }
+            self = path
         } else {
             guard let path = try? AbsolutePath(validating: argument) else {
                 return nil
@@ -458,4 +455,7 @@ extension Sanitizer {
     fileprivate static var formattedValues: String {
         return Sanitizer.allCases.map(\.rawValue).joined(separator: ", ")
     }
+}
+
+extension BuildSystemProvider.Kind: ExpressibleByArgument {
 }

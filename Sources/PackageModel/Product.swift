@@ -20,7 +20,7 @@ public class Product: Codable {
     public let name: String
 
     /// Fully qualified name for this product: package ID + name of this product
-    public let ID: String
+    public let identity: String
 
     /// The type of product to create.
     public let type: ProductType
@@ -43,7 +43,7 @@ public class Product: Codable {
             throw InternalError("Targets cannot be empty")
         }
         if type == .executable {
-            guard targets.filter({ $0.type == .executable }).count == 1 else {
+            guard targets.executables.count == 1 else {
                 throw InternalError("Executable products should have exactly one executable target.")
             }
         }
@@ -54,7 +54,7 @@ public class Product: Codable {
         }
         self.name = name
         self.type = type
-        self.ID = package.description.lowercased() + "_" + name
+        self.identity = package.description.lowercased() + "_" + name
         self._targets = .init(wrappedValue: targets)
         self.testEntryPointPath = testEntryPointPath
     }

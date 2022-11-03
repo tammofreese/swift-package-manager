@@ -33,13 +33,10 @@ public final class UserToolchain: Toolchain {
 
     /// Path of the `swiftc` compiler.
     public let swiftCompilerPath: AbsolutePath
-
-    public var extraCCFlags: [String]
-
-    public let extraSwiftCFlags: [String]
-
-    public var extraCPPFlags: [String]
-
+    
+    /// Additional flags to be passed to the build tools.
+    public var extraFlags: BuildFlags
+    
     /// Path of the `swift` interpreter.
     public var swiftInterpreterPath: AbsolutePath {
         return self.swiftCompilerPath.parentDirectory.appending(component: "swift" + hostExecutableSuffix)
@@ -70,7 +67,7 @@ public final class UserToolchain: Toolchain {
         // for now but we shouldn't need to resolve the symlink.  We need to lay
         // down symlinks to runtimes in our fake toolchain as part of the
         // bootstrap script.
-        let swiftCompiler = resolveSymlinks(self.swiftCompilerPath)
+        let swiftCompiler = try resolveSymlinks(self.swiftCompilerPath)
 
         let runtime = swiftCompiler.appending(
             RelativePath("../../lib/swift/clang/lib/darwin/libclang_rt.\(sanitizer.shortName)_osx_dynamic.dylib"))
@@ -260,7 +257,7 @@ public final class UserToolchain: Toolchain {
         return try UserToolchain.getTool("swift-symbolgraph-extract", binDir: self.swiftCompilerPath.parentDirectory)
     }
 
-    internal static func deriveSwiftCFlags(triple: Triple, destination: Destination, environment: EnvironmentVariables) -> [String] {
+    internal static func deriveSwiftCFlags(triple: Triple, destination: Destination, environment: EnvironmentVariables) throws -> [String] {
         guard let sdk = destination.sdk else {
             if triple.isWindows() {
                 // Windows uses a variable named SDKROOT to determine the root of
@@ -300,8 +297,8 @@ public final class UserToolchain: Toolchain {
                                         .appending(component: "Library")
                                         .appending(component: "XCTest-\(info.defaults.xctestVersion)")
 
-                        xctest = [
-                            "-I", AbsolutePath("usr/lib/swift/windows", relativeTo: installation).pathString,
+                        xctest = try [
+                            "-I", AbsolutePath(validating: "usr/lib/swift/windows", relativeTo: installation).pathString,
                             // Migration Path
                             //
                             // Older Swift (<=5.7) installations placed the
@@ -311,8 +308,8 @@ public final class UserToolchain: Toolchain {
                             // gained the ability to consult the architecture
                             // indepndent directory for Swift modules, allowing
                             // the merged swiftmodules.  XCTest followed suit.
-                            "-I", AbsolutePath("usr/lib/swift/windows/\(triple.arch)", relativeTo: installation).pathString,
-                            "-L", AbsolutePath("usr/lib/swift/windows/\(triple.arch)", relativeTo: installation).pathString,
+                            "-I", AbsolutePath(validating: "usr/lib/swift/windows/\(triple.arch)", relativeTo: installation).pathString,
+                            "-L", AbsolutePath(validating: "usr/lib/swift/windows/\(triple.arch)", relativeTo: installation).pathString,
                         ]
 
                         // Migration Path
@@ -323,8 +320,7 @@ public final class UserToolchain: Toolchain {
                         // this getting enabled (~5.7), we always had a singular
                         // installed SDK.  Prefer the new variant which has an
                         // architecture subdirectory in `bin` if available.
-                        let implib: AbsolutePath =
-                            AbsolutePath("usr/lib/swift/windows/XCTest.lib", relativeTo: installation)
+                        let implib = try AbsolutePath(validating: "usr/lib/swift/windows/XCTest.lib", relativeTo: installation)
                         if localFileSystem.exists(implib) {
                             xctest.append(contentsOf: ["-L", implib.parentDirectory.pathString])
                         }
@@ -336,13 +332,13 @@ public final class UserToolchain: Toolchain {
                 }
             }
 
-            return destination.extraSwiftCFlags
+            return destination.extraFlags.swiftCompilerFlags
         }
 
         return (triple.isDarwin() || triple.isAndroid() || triple.isWASI() || triple.isWindows()
                 ? ["-sdk", sdk.pathString]
                 : [])
-        + destination.extraSwiftCFlags
+        + destination.extraFlags.swiftCompilerFlags
     }
 
     // MARK: - initializer
@@ -389,18 +385,19 @@ public final class UserToolchain: Toolchain {
         }
 
         self.triple = triple
+        self.extraFlags = BuildFlags()
 
-        self.extraSwiftCFlags = Self.deriveSwiftCFlags(triple: triple, destination: destination, environment: environment)
+        self.extraFlags.swiftCompilerFlags = try Self.deriveSwiftCFlags(triple: triple, destination: destination, environment: environment)
 
         if let sdk = destination.sdk {
-            self.extraCCFlags = [
+            self.extraFlags.cCompilerFlags = [
                 triple.isDarwin() ? "-isysroot" : "--sysroot", sdk.pathString
-            ] + destination.extraCCFlags
+            ] + destination.extraFlags.cCompilerFlags
 
-            self.extraCPPFlags = destination.extraCPPFlags
+            self.extraFlags.cxxCompilerFlags = destination.extraFlags.cxxCompilerFlags
         } else {
-            self.extraCCFlags = destination.extraCCFlags
-            self.extraCPPFlags = destination.extraCPPFlags
+            self.extraFlags.cCompilerFlags = destination.extraFlags.cCompilerFlags
+            self.extraFlags.cxxCompilerFlags = destination.extraFlags.cxxCompilerFlags
         }
 
         if triple.isWindows() {
@@ -411,22 +408,22 @@ public final class UserToolchain: Toolchain {
                     case .multithreadedDebugDLL:
                         // Defines _DEBUG, _MT, and _DLL
                         // Linker uses MSVCRTD.lib
-                        self.extraCCFlags += ["-D_DEBUG", "-D_MT", "-D_DLL", "-Xclang", "--dependent-lib=msvcrtd"]
+                        self.extraFlags.cCompilerFlags += ["-D_DEBUG", "-D_MT", "-D_DLL", "-Xclang", "--dependent-lib=msvcrtd"]
 
                     case .multithreadedDLL:
                         // Defines _MT, and _DLL
                         // Linker uses MSVCRT.lib
-                        self.extraCCFlags += ["-D_MT", "-D_DLL", "-Xclang", "--dependent-lib=msvcrt"]
+                        self.extraFlags.cCompilerFlags += ["-D_MT", "-D_DLL", "-Xclang", "--dependent-lib=msvcrt"]
 
                     case .multithreadedDebug:
                         // Defines _DEBUG, and _MT
                         // Linker uses LIBCMTD.lib
-                        self.extraCCFlags += ["-D_DEBUG", "-D_MT", "-Xclang", "--dependent-lib=libcmtd"]
+                        self.extraFlags.cCompilerFlags += ["-D_DEBUG", "-D_MT", "-Xclang", "--dependent-lib=libcmtd"]
 
                     case .multithreaded:
                         // Defines _MT
                         // Linker uses LIBCMT.lib
-                        self.extraCCFlags += ["-D_MT", "-Xclang", "--dependent-lib=libcmt"]
+                        self.extraFlags.cCompilerFlags += ["-D_MT", "-Xclang", "--dependent-lib=libcmt"]
                     }
                 }
             }
@@ -444,7 +441,7 @@ public final class UserToolchain: Toolchain {
         self.configuration = .init(
             librarianPath: librarianPath,
             swiftCompilerPath: swiftCompilers.manifest,
-            swiftCompilerFlags: self.extraSwiftCFlags,
+            swiftCompilerFlags: self.extraFlags.swiftCompilerFlags,
             swiftCompilerEnvironment: environment,
             swiftPMLibrariesLocation: swiftPMLibrariesLocation,
             sdkRootPath: self.destination.sdk,

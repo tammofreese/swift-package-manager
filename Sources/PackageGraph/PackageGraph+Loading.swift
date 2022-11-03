@@ -154,7 +154,8 @@ extension PackageGraph {
         return try PackageGraph(
             rootPackages: rootPackages,
             rootDependencies: resolvedPackages.filter{ rootDependencies.contains($0.manifest) },
-            dependencies: requiredDependencies
+            dependencies: requiredDependencies,
+            binaryArtifacts: binaryArtifacts
         )
     }
 }
@@ -384,69 +385,8 @@ private func createResolvedPackages(
         }
     }
 
-    // Find duplicate products in the package graph.
-    let productList = packageBuilders.flatMap({ $0.products }).map({ $0.product })
-
-    if moduleAliasingUsed {
-        // FIXME: If moduleAliasingUsed, we want to allow duplicate product names
-        // from different packages as often times the product name of a package is
-        // same as its target name which might have a conflict with the name of the
-        // product itself or its target from another package.
-        // The following is a workaround; eventually we want to allow duplicate product
-        // names even when module aliasing is not used, which is a cleaner solution.
-        // Ref rdar://94744134.
-
-        // We first divide the products by type which determines whether to use
-        // the product ID (unique, fully qualified name) or name to look up duplicates.
-
-        // There are no shared dirs/files created for automatic library products, so look
-        // up duplicates with the ID property for those products.
-        let autoLibProducts = productList
-            .filter{ $0.isDefaultLibrary }
-            .spm_findDuplicateElements(by: \.ID)
-            .map({ $0[0] })
-
-        // Building other products, i.e. static libs, dylibs, executables, result in
-        // shared dirs/files, e.g. Foo.product (dir), libFoo.dylib, etc., so we want
-        // to keep the original product names for those. Thus, use the name property
-        // to look up duplicates.
-        let otherProducts = productList
-            .filter{ !$0.isDefaultLibrary }
-            .spm_findDuplicateElements(by: \.name)
-            .map({ $0[0] })
-
-        let allProducts = autoLibProducts + otherProducts
-        // Emit diagnostics for duplicate products.
-        for dupProduct in allProducts {
-            let packages = packageBuilders
-                .filter({ $0.products.contains(where: { $0.product.isDefaultLibrary ? $0.product.ID == dupProduct.ID : $0.product.name == dupProduct.name }) })
-                .map{ $0.package.identity.description }
-                .sorted()
-            observabilityScope.emit(PackageGraphError.duplicateProduct(product: dupProduct.name, packages: packages))
-        }
-        // Remove the duplicate products from the builders.
-        let autoLibProductIDs = autoLibProducts.map{ $0.ID }
-        let otherProductNames = otherProducts.map{ $0.name }
-        for packageBuilder in packageBuilders {
-            packageBuilder.products = packageBuilder.products.filter { $0.product.isDefaultLibrary ? !autoLibProductIDs.contains($0.product.ID) : !otherProductNames.contains($0.product.name) }
-        }
-    } else {
-        let duplicateProducts = productList
-            .spm_findDuplicateElements(by: \.name)
-            .map({ $0[0] })
-        // Emit diagnostics for duplicate products.
-        for dupProduct in duplicateProducts {
-            let packages = packageBuilders
-                .filter({ $0.products.contains(where: { $0.product.name == dupProduct.name }) })
-                .map{ $0.package.identity.description }
-                .sorted()
-            observabilityScope.emit(PackageGraphError.duplicateProduct(product: dupProduct.name, packages: packages))
-        }
-        // Remove the duplicate products from the builders.
-        for packageBuilder in packageBuilders {
-            packageBuilder.products = packageBuilder.products.filter { !duplicateProducts.map{$0.name}.contains($0.product.name) }
-        }
-    }
+    let dupProductsChecker = DuplicateProductsChecker(packageBuilders: packageBuilders)
+    try dupProductsChecker.run(lookupByProductIDs: moduleAliasingUsed, observabilityScope: observabilityScope)
 
     // The set of all target names.
     var allTargetNames = Set<String>()
@@ -473,15 +413,20 @@ private func createResolvedPackages(
                 return false
             })
 
+        let lookupByProductIDs = packageBuilder.package.manifest.disambiguateByProductIDs || moduleAliasingUsed
+
         let mapToExplicitProducts = { (dependency: ResolvedPackageBuilder) -> [ResolvedProductBuilder] in
-            // Filter out synthesized products such as tests and implicit executables.
-            let explicit = Set(dependency.package.manifest.products.lazy.map({ $0.name }))
-            return dependency.products.filter({ explicit.contains($0.product.name) })
-        }
+                // Filter out synthesized products such as tests and implicit executables.
+                // Check if a dependency product is explicitly declared as a product in its package manifest
+                let manifestProducts = dependency.package.manifest.products.lazy.map { $0.name }
+                let explicitProducts = dependency.package.products.filter { manifestProducts.contains($0.name) }
+                let explicitIdsOrNames = Set(explicitProducts.lazy.map({ lookupByProductIDs ? $0.identity : $0.name }))
+                return dependency.products.filter({ lookupByProductIDs ? explicitIdsOrNames.contains($0.product.identity) : explicitIdsOrNames.contains($0.product.name) })
+            }
 
         // Get all the products from dependencies of this package.
         let productDependencies = packageBuilder.dependencies.flatMap(mapToExplicitProducts)
-        let productDependencyMap = moduleAliasingUsed ? productDependencies.spm_createDictionary({ ($0.product.ID, $0) }) : productDependencies.spm_createDictionary({ ($0.product.name, $0) })
+        let productDependencyMap = lookupByProductIDs ? productDependencies.spm_createDictionary({ ($0.product.identity, $0) }) : productDependencies.spm_createDictionary({ ($0.product.name, $0) })
 
         // Get all the products in this package.
         let innerProductDependencies = mapToExplicitProducts(packageBuilder)
@@ -508,7 +453,7 @@ private func createResolvedPackages(
 
                 // Find the product in this package, or in this package's dependency products.
                 // Look it up by ID if module aliasing is used, otherwise by name.
-                let product = productFromSamePackage ?? (moduleAliasingUsed ? productDependencyMap[productRef.ID] : productDependencyMap[productRef.name])
+                let product = productFromSamePackage ?? (lookupByProductIDs ? productDependencyMap[productRef.identity] : productDependencyMap[productRef.name])
                 guard let product = product else {
                     // Only emit a diagnostic if there are no other diagnostics.
                     // This avoids flooding the diagnostics with product not
@@ -517,7 +462,7 @@ private func createResolvedPackages(
                     if !observabilityScope.errorsReportedInAnyScope {
                         // Emit error if a product (not target) declared in the package is also a productRef (dependency)
                         let declProductsAsDependency = package.products.filter { product in
-                            product.name == productRef.name
+                            lookupByProductIDs ? product.identity == productRef.identity : product.name == productRef.name
                         }.map {$0.targets}.flatMap{$0}.filter { t in
                             t.name != productRef.name
                         }
@@ -584,6 +529,56 @@ fileprivate extension Product {
     }
 }
 
+private class DuplicateProductsChecker {
+    var packageIDToBuilder = [String: ResolvedPackageBuilder]()
+    var checkedPkgIDs = [String]()
+
+    init(packageBuilders: [ResolvedPackageBuilder]) {
+        for packageBuilder in packageBuilders {
+            let pkgID = packageBuilder.package.identity.description.lowercased()
+            packageIDToBuilder[pkgID] = packageBuilder
+        }
+    }
+
+    func run(lookupByProductIDs: Bool = false, observabilityScope: ObservabilityScope) throws {
+        var productToPkgMap = [String: [String]]()
+        for (_, pkgBuilder) in packageIDToBuilder {
+            let useProductIDs = pkgBuilder.package.manifest.disambiguateByProductIDs || lookupByProductIDs
+            let depProductRefs = pkgBuilder.package.targets.map{$0.dependencies}.flatMap{$0}.compactMap{$0.product}
+            for depRef in depProductRefs {
+                if let depPkg = depRef.package?.lowercased() {
+                    checkedPkgIDs.append(depPkg)
+                    let depProductIDs = packageIDToBuilder[depPkg]?.package.products.filter { $0.identity == depRef.identity }.map { useProductIDs && $0.isDefaultLibrary ? $0.identity : $0.name } ?? []
+                    for depID in depProductIDs {
+                        productToPkgMap[depID, default: []].append(depPkg)
+                    }
+                } else {
+                    let depPkgs = pkgBuilder.dependencies.filter{$0.products.contains{$0.product.name == depRef.name}}.map{$0.package.identity.description.lowercased()}
+                    productToPkgMap[depRef.name, default: []].append(contentsOf: depPkgs)
+                    checkedPkgIDs.append(contentsOf: depPkgs)
+                }
+            }
+            for (depIDOrName, depPkgs) in productToPkgMap.filter({Set($0.value).count > 1}) {
+                let name = depIDOrName.components(separatedBy: "_").dropFirst().joined(separator: "_")
+                throw PackageGraphError.duplicateProduct(product: name.isEmpty ? depIDOrName : name, packages: depPkgs.sorted())
+            }
+        }
+
+        let uncheckedPkgs = packageIDToBuilder.filter{!checkedPkgIDs.contains($0.key)}
+        for (pkgID, pkgBuilder) in uncheckedPkgs {
+            let productIDOrNames = pkgBuilder.products.map { pkgBuilder.package.manifest.disambiguateByProductIDs && $0.product.isDefaultLibrary ? $0.product.identity : $0.product.name }
+            for productIDOrName in productIDOrNames {
+                productToPkgMap[productIDOrName, default: []].append(pkgID)
+            }
+        }
+
+        let duplicates = productToPkgMap.filter({Set($0.value).count > 1})
+        for (productName, pkgs) in duplicates {
+            throw PackageGraphError.duplicateProduct(product: productName, packages: pkgs.sorted())
+        }
+    }
+}
+
 private func computePlatforms(
     package: Package,
     usingXCTest: Bool,
@@ -636,14 +631,19 @@ private func computePlatforms(
     for platformName in remainingPlatforms.sorted() {
         let platform = platformRegistry.platformByName[platformName]!
 
-        let oldestSupportedVersion: PlatformVersion
+        let minimumSupportedVersion: PlatformVersion
         if usingXCTest, let xcTestMinimumDeploymentTarget = xcTestMinimumDeploymentTargets[platform] {
-            oldestSupportedVersion = xcTestMinimumDeploymentTarget
-        } else if platform == .macCatalyst, let iOS = derivedPlatforms.first(where: { $0.platform == .iOS }) {
-            // If there was no deployment target specified for Mac Catalyst, fall back to the iOS deployment target.
-            oldestSupportedVersion = max(platform.oldestSupportedVersion, iOS.version)
+            minimumSupportedVersion = xcTestMinimumDeploymentTarget
         } else {
-            oldestSupportedVersion = platform.oldestSupportedVersion
+            minimumSupportedVersion = platform.oldestSupportedVersion
+        }
+
+        let oldestSupportedVersion: PlatformVersion
+        if platform == .macCatalyst, let iOS = derivedPlatforms.first(where: { $0.platform == .iOS }) {
+            // If there was no deployment target specified for Mac Catalyst, fall back to the iOS deployment target.
+            oldestSupportedVersion = max(minimumSupportedVersion, iOS.version)
+        } else {
+            oldestSupportedVersion = minimumSupportedVersion
         }
 
         let supportedPlatform = SupportedPlatform(
@@ -811,8 +811,10 @@ private final class ResolvedTargetBuilder: ResolvedBuilder<ResolvedTarget> {
         let dependencies = try self.dependencies.map { dependency -> ResolvedTarget.Dependency in
             switch dependency {
             case .target(let targetBuilder, let conditions):
+                try self.target.validateDependency(target: targetBuilder.target)
                 return .target(try targetBuilder.construct(), conditions: conditions)
             case .product(let productBuilder, let conditions):
+                try self.target.validateDependency(product: productBuilder.product, productPackage: productBuilder.packageBuilder.package.identity)
                 let product = try productBuilder.construct()
                 if !productBuilder.packageBuilder.isAllowedToVendUnsafeProducts {
                     try self.diagnoseInvalidUseOfUnsafeFlags(product)
@@ -830,6 +832,19 @@ private final class ResolvedTargetBuilder: ResolvedBuilder<ResolvedTarget> {
     }
 }
 
+extension Target {
+
+  func validateDependency(target: Target) throws {
+    if self.type == .plugin && target.type == .library {
+      throw PackageGraphError.unsupportedPluginDependency(targetName: self.name, dependencyName: target.name, dependencyType: target.type.rawValue, dependencyPackage: nil)
+    }
+  }
+  func validateDependency(product: Product, productPackage: PackageIdentity) throws {
+    if self.type == .plugin && product.type.isLibrary {
+      throw PackageGraphError.unsupportedPluginDependency(targetName: self.name, dependencyName: product.name, dependencyType: product.type.description, dependencyPackage: productPackage.description)
+    }
+  }
+}
 /// Builder for resolved package.
 private final class ResolvedPackageBuilder: ResolvedBuilder<ResolvedPackage> {
 
@@ -888,6 +903,8 @@ fileprivate func findCycle(
 ) rethrows -> (path: [Manifest], cycle: [Manifest])? {
     // Ordered set to hold the current traversed path.
     var path = OrderedCollections.OrderedSet<Manifest>()
+    
+    var fullyVisitedManifests = Set<Manifest>()
 
     // Function to visit nodes recursively.
     // FIXME: Convert to stack.
@@ -895,6 +912,12 @@ fileprivate func findCycle(
       _ node: GraphLoadingNode,
       _ successors: (GraphLoadingNode) throws -> [GraphLoadingNode]
     ) rethrows -> (path: [Manifest], cycle: [Manifest])? {
+        // Once all successors have been visited, this node cannot participate
+        // in a cycle.
+        if fullyVisitedManifests.contains(node.manifest) {
+            return nil
+        }
+        
         // If this node is already in the current path then we have found a cycle.
         if !path.append(node.manifest).inserted {
             let index = path.firstIndex(of: node.manifest)! // forced unwrap safe
@@ -909,6 +932,8 @@ fileprivate func findCycle(
         // No cycle found for this node, remove it from the path.
         let item = path.removeLast()
         assert(item == node.manifest)
+        // Track fully visited nodes
+        fullyVisitedManifests.insert(node.manifest)
         return nil
     }
 

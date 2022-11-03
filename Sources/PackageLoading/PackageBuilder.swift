@@ -782,8 +782,23 @@ public final class PackageBuilder {
         }
 
         // Check for duplicate target dependencies
-        dependencies.filter{$0.product?.moduleAliases == nil}.spm_findDuplicateElements(by: \.nameAndType).map(\.[0].name).forEach {
-            self.observabilityScope.emit(.duplicateTargetDependency(dependency: $0, target: potentialModule.name, package: self.identity.description))
+        if self.manifest.disambiguateByProductIDs {
+            let dupProductIDs = dependencies.compactMap{$0.product?.identity}.spm_findDuplicates()
+            for dupProductID in dupProductIDs {
+                let comps = dupProductID.components(separatedBy: "_")
+                let pkg = comps.first ?? ""
+                let name = comps.dropFirst().joined(separator: "_")
+                let dupProductName = name.isEmpty ? dupProductID : name
+                self.observabilityScope.emit(.duplicateProduct(name: dupProductName, package: pkg))
+            }
+            let dupTargetNames = dependencies.compactMap{$0.target?.name}.spm_findDuplicates()
+            for dupTargetName in dupTargetNames {
+                self.observabilityScope.emit(.duplicateTargetDependency(dependency: dupTargetName, target: potentialModule.name, package: self.identity.description))
+            }
+        } else {
+            dependencies.filter{$0.product?.moduleAliases == nil}.spm_findDuplicateElements(by: \.nameAndType).map(\.[0].name).forEach {
+                self.observabilityScope.emit(.duplicateTargetDependency(dependency: $0, target: potentialModule.name, package: self.identity.description))
+            }
         }
 
         // Create the build setting assignment table for this target.
@@ -1292,7 +1307,7 @@ public final class PackageBuilder {
     }
 
     private func validateExecutableProduct(_ product: ProductDescription, with targets: [Target]) -> Bool {
-        let executableTargetCount = targets.filter { $0.type == .executable }.count
+        let executableTargetCount = targets.executables.count
         guard executableTargetCount == 1 else {
             if executableTargetCount == 0 {
                 if let target = targets.spm_only {

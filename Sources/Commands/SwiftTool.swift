@@ -12,8 +12,8 @@
 
 import ArgumentParser
 import Basics
-import Build
 import Dispatch
+@_implementationOnly import DriverSupport
 import class Foundation.NSLock
 import class Foundation.ProcessInfo
 import OrderedCollections
@@ -27,7 +27,6 @@ import class TSCUtility.MultiLineNinjaProgressAnimation
 import class TSCUtility.NinjaProgressAnimation
 import protocol TSCUtility.ProgressAnimationProtocol
 import Workspace
-import XCBuildSupport
 
 #if canImport(WinSDK)
 import WinSDK
@@ -43,6 +42,10 @@ import class TSCUtility.PercentProgressAnimation
 import var TSCUtility.verbosity
 
 typealias Diagnostic = Basics.Diagnostic
+
+// TODO: Refactor in upcoming PRs
+import Build
+import XCBuildSupport
 
 private class ToolWorkspaceDelegate: WorkspaceDelegate {
     private struct DownloadProgress {
@@ -201,15 +204,29 @@ private class ToolWorkspaceDelegate: WorkspaceDelegate {
     func didDownloadAllBinaryArtifacts() {}
 }
 
+struct ToolWorkspaceConfiguration {
+    let wantsMultipleTestProducts: Bool
+    let wantsREPLProduct: Bool
+
+    init(wantsMultipleTestProducts: Bool = false,
+         wantsREPLProduct: Bool = false) {
+        self.wantsMultipleTestProducts = wantsMultipleTestProducts
+        self.wantsREPLProduct = wantsREPLProduct
+    }
+}
+
 protocol SwiftCommand: ParsableCommand {
     var globalOptions: GlobalOptions { get }
+    var toolWorkspaceConfiguration: ToolWorkspaceConfiguration { get }
 
+    func buildSystemProvider(_ swiftTool: SwiftTool) throws -> BuildSystemProvider
     func run(_ swiftTool: SwiftTool) throws
 }
 
 extension SwiftCommand {
     public func run() throws {
-        let swiftTool = try SwiftTool(options: globalOptions)
+        let swiftTool = try SwiftTool(options: globalOptions, toolWorkspaceConfiguration: self.toolWorkspaceConfiguration)
+        swiftTool.buildSystemProvider = try buildSystemProvider(swiftTool)
         var toolError: Error? = .none
         do {
             try self.run(swiftTool)
@@ -229,6 +246,42 @@ extension SwiftCommand {
     }
 
     public static var _errorLabel: String { "error" }
+
+    public var toolWorkspaceConfiguration: ToolWorkspaceConfiguration {
+        return .init()
+    }
+
+    public func buildSystemProvider(_ swiftTool: SwiftTool) throws -> BuildSystemProvider {
+        return .init(providers: [
+            .native: { (explicitProduct: String?, cacheBuildManifest: Bool, customBuildParameters: BuildParameters?, customPackageGraphLoader: (() throws -> PackageGraph)?, customOutputStream: OutputByteStream?, customLogLevel: Diagnostic.Severity?, customObservabilityScope: ObservabilityScope?) throws -> BuildSystem in
+                let testEntryPointPath = customBuildParameters?.testProductStyle.explicitlySpecifiedEntryPointPath
+                let graphLoader = { try swiftTool.loadPackageGraph(explicitProduct: explicitProduct, testEntryPointPath: testEntryPointPath) }
+                return try BuildOperation(
+                    buildParameters: customBuildParameters ?? swiftTool.buildParameters(),
+                    cacheBuildManifest: cacheBuildManifest && swiftTool.canUseCachedBuildManifest(),
+                    packageGraphLoader: customPackageGraphLoader ?? graphLoader,
+                    additionalFileRules: FileRuleDescription.swiftpmFileTypes,
+                    pluginScriptRunner: swiftTool.getPluginScriptRunner(),
+                    pluginWorkDirectory: try swiftTool.getActiveWorkspace().location.pluginWorkingDirectory,
+                    disableSandboxForPluginCommands: swiftTool.options.security.shouldDisableSandbox,
+                    outputStream: customOutputStream ?? swiftTool.outputStream,
+                    logLevel: customLogLevel ?? swiftTool.logLevel,
+                    fileSystem: swiftTool.fileSystem,
+                    observabilityScope: customObservabilityScope ?? swiftTool.observabilityScope) },
+            .xcode: { (explicitProduct: String?, cacheBuildManifest: Bool, customBuildParameters: BuildParameters?, customPackageGraphLoader: (() throws -> PackageGraph)?, customOutputStream: OutputByteStream?, customLogLevel: Diagnostic.Severity?, customObservabilityScope: ObservabilityScope?) throws -> BuildSystem in
+                let graphLoader = { try swiftTool.loadPackageGraph(explicitProduct: explicitProduct) }
+                // FIXME: Implement the custom build command provider also.
+                return try XcodeBuildSystem(
+                    buildParameters: customBuildParameters ?? swiftTool.buildParameters(),
+                    packageGraphLoader: customPackageGraphLoader ?? graphLoader,
+                    outputStream: customOutputStream ?? swiftTool.outputStream,
+                    logLevel: customLogLevel ?? swiftTool.logLevel,
+                    fileSystem: swiftTool.fileSystem,
+                    observabilityScope: customObservabilityScope ?? swiftTool.observabilityScope
+                )
+            }
+        ])
+    }
 }
 
 /// A safe wrapper of TSCBasic.exec.
@@ -315,26 +368,31 @@ public class SwiftTool {
     /// The file system in use
     let fileSystem: FileSystem
 
+    private let toolWorkspaceConfiguration: ToolWorkspaceConfiguration
+
+    fileprivate var buildSystemProvider: BuildSystemProvider?
+
     /// Create an instance of this tool.
     ///
     /// - parameter options: The command line options to be passed to this tool.
-    convenience init(options: GlobalOptions) throws {
+    convenience init(options: GlobalOptions, toolWorkspaceConfiguration: ToolWorkspaceConfiguration = .init()) throws {
         // output from background activities goes to stderr, this includes diagnostics and output from build operations,
         // package resolution that take place as part of another action
         // CLI commands that have user facing output, use stdout directly to emit the final result
         // this means that the build output from "swift build" goes to stdout
         // but the build output from "swift test" goes to stderr, while the tests output go to stdout
-        try self.init(outputStream: TSCBasic.stderrStream, options: options)
+        try self.init(outputStream: TSCBasic.stderrStream, options: options, toolWorkspaceConfiguration: toolWorkspaceConfiguration)
     }
 
     // marked internal for testing
-    internal init(outputStream: OutputByteStream, options: GlobalOptions) throws {
+    internal init(outputStream: OutputByteStream, options: GlobalOptions, toolWorkspaceConfiguration: ToolWorkspaceConfiguration = .init()) throws {
         self.fileSystem = localFileSystem
         // first, bootstrap the observability system
         self.logLevel = options.logging.logLevel
         self.observabilityHandler = SwiftToolObservabilityHandler(outputStream: outputStream, logLevel: self.logLevel)
         let observabilitySystem = ObservabilitySystem(self.observabilityHandler)
         self.observabilityScope = observabilitySystem.topScope
+        self.toolWorkspaceConfiguration = toolWorkspaceConfiguration
 
         let cancellator = Cancellator(observabilityScope: self.observabilityScope)
 
@@ -415,7 +473,7 @@ public class SwiftTool {
 
         self.packageRoot = packageRoot
         self.scratchDirectory =
-            getEnvBuildPath(workingDir: cwd) ??
+            try getEnvBuildPath(workingDir: cwd) ??
             options.locations.scratchDirectory ??
             (packageRoot ?? cwd).appending(component: ".build")
 
@@ -513,6 +571,8 @@ public class SwiftTool {
             configuration: .init(
                 skipDependenciesUpdates: options.resolver.skipDependencyUpdate,
                 prefetchBasedOnResolvedFile: options.resolver.shouldEnableResolverPrefetching,
+                shouldCreateMultipleTestProducts: toolWorkspaceConfiguration.wantsMultipleTestProducts || options.build.buildSystem == .xcode,
+                createREPLProduct: toolWorkspaceConfiguration.wantsREPLProduct,
                 additionalFileRules: isXcodeBuildSystemEnabled ? FileRuleDescription.xcbuildFileTypes : FileRuleDescription.swiftpmFileTypes,
                 sharedDependenciesCacheEnabled: self.options.caching.useDependenciesCache,
                 fingerprintCheckingMode: self.options.security.fingerprintCheckingMode,
@@ -604,9 +664,7 @@ public class SwiftTool {
     @discardableResult
     func loadPackageGraph(
         explicitProduct: String? = nil,
-        createMultipleTestProducts: Bool = false,
-        testEntryPointPath: AbsolutePath? = nil,
-        createREPLProduct: Bool = false
+        testEntryPointPath: AbsolutePath? = nil
     ) throws -> PackageGraph {
         do {
             let workspace = try getActiveWorkspace()
@@ -615,8 +673,6 @@ public class SwiftTool {
             let graph = try workspace.loadPackageGraph(
                 rootInput: getWorkspaceRoot(),
                 explicitProduct: explicitProduct,
-                createMultipleTestProducts: createMultipleTestProducts,
-                createREPLProduct: createREPLProduct,
                 forceResolvedVersions: options.resolver.forceResolvedVersions,
                 testEntryPointPath: testEntryPointPath,
                 observabilityScope: self.observabilityScope
@@ -649,7 +705,7 @@ public class SwiftTool {
     }
 
     /// Returns the user toolchain to compile the actual product.
-    func getToolchain() throws -> UserToolchain {
+    func getDestinationToolchain() throws -> UserToolchain {
         return try _destinationToolchain.get()
     }
 
@@ -661,7 +717,7 @@ public class SwiftTool {
         return try _manifestLoader.get()
     }
 
-    private func canUseCachedBuildManifest() throws -> Bool {
+    fileprivate func canUseCachedBuildManifest() throws -> Bool {
         if !self.options.caching.cacheBuildManifest {
             return false
         }
@@ -690,7 +746,8 @@ public class SwiftTool {
     // "customOutputStream" is designed to support build output redirection
     // but it is only expected to be used when invoking builds from "swift build" command.
     // in all other cases, the build output should go to the default which is stderr
-    func createBuildOperation(
+    func createBuildSystem(
+        explicitBuildSystem: BuildSystemProvider.Kind? = .none,
         explicitProduct: String? = .none,
         cacheBuildManifest: Bool = true,
         customBuildParameters: BuildParameters? = .none,
@@ -698,65 +755,21 @@ public class SwiftTool {
         customOutputStream: OutputByteStream? = .none,
         customLogLevel: Diagnostic.Severity? = .none,
         customObservabilityScope: ObservabilityScope? = .none
-    ) throws -> BuildOperation {
-        let testEntryPointPath = customBuildParameters?.testProductStyle.explicitlySpecifiedEntryPointPath
-        let graphLoader = { try self.loadPackageGraph(explicitProduct: explicitProduct, testEntryPointPath: testEntryPointPath) }
-
-        // Construct the build operation.
-        // FIXME: We need to implement the build tool invocation closure here so that build tool plugins work with dumping the symbol graph (the only case that currently goes through this path, as far as I can tell). rdar://86112934
-        let buildOp = try BuildOperation(
-            buildParameters: customBuildParameters ?? self.buildParameters(),
-            cacheBuildManifest: cacheBuildManifest && self.canUseCachedBuildManifest(),
-            packageGraphLoader: customPackageGraphLoader ?? graphLoader,
-            additionalFileRules: FileRuleDescription.swiftpmFileTypes,
-            pluginScriptRunner: self.getPluginScriptRunner(),
-            pluginWorkDirectory: try self.getActiveWorkspace().location.pluginWorkingDirectory,
-            disableSandboxForPluginCommands: self.options.security.shouldDisableSandbox,
-            outputStream: customOutputStream ?? self.outputStream,
-            logLevel: customLogLevel ?? self.logLevel,
-            fileSystem: self.fileSystem,
-            observabilityScope: customObservabilityScope ?? self.observabilityScope
-        )
-
-        // register the build system with the cancellation handler
-        self.cancellator.register(name: "build system", handler: buildOp.cancel)
-        return buildOp
-    }
-
-    // note: do not customize the OutputStream unless absolutely necessary
-    // "customOutputStream" is designed to support build output redirection
-    // but it is only expected to be used when invoking builds from "swift build" command.
-    // in all other cases, the build output should go to the default which is stderr
-    func createBuildSystem(
-        explicitProduct: String? = .none,
-        customBuildParameters: BuildParameters? = .none,
-        customPackageGraphLoader: (() throws -> PackageGraph)? = .none,
-        customOutputStream: OutputByteStream? = .none,
-        customObservabilityScope: ObservabilityScope? = .none
     ) throws -> BuildSystem {
-        let buildSystem: BuildSystem
-        switch options.build.buildSystem {
-        case .native:
-            buildSystem = try self.createBuildOperation(
-                explicitProduct: explicitProduct,
-                cacheBuildManifest: true,
-                customBuildParameters: customBuildParameters,
-                customPackageGraphLoader: customPackageGraphLoader,
-                customOutputStream: customOutputStream,
-                customObservabilityScope: customObservabilityScope
-            )
-        case .xcode:
-            let graphLoader = { try self.loadPackageGraph(explicitProduct: explicitProduct, createMultipleTestProducts: true) }
-            // FIXME: Implement the custom build command provider also.
-            buildSystem = try XcodeBuildSystem(
-                buildParameters: customBuildParameters ?? self.buildParameters(),
-                packageGraphLoader: customPackageGraphLoader ??  graphLoader,
-                outputStream: customOutputStream ?? self.outputStream,
-                logLevel: self.logLevel,
-                fileSystem: self.fileSystem,
-                observabilityScope: customObservabilityScope ?? self.observabilityScope
-            )
+        guard let buildSystemProvider = buildSystemProvider else {
+            fatalError("build system provider not initialized")
         }
+
+        let buildSystem = try buildSystemProvider.createBuildSystem(
+            kind: explicitBuildSystem ?? options.build.buildSystem,
+            explicitProduct: explicitProduct,
+            cacheBuildManifest: cacheBuildManifest,
+            customBuildParameters: customBuildParameters,
+            customPackageGraphLoader: customPackageGraphLoader,
+            customOutputStream: customOutputStream,
+            customLogLevel: customLogLevel,
+            customObservabilityScope: customObservabilityScope
+        )
 
         // register the build system with the cancellation handler
         self.cancellator.register(name: "build system", handler: buildSystem.cancel)
@@ -770,7 +783,7 @@ public class SwiftTool {
 
     private lazy var _buildParameters: Result<BuildParameters, Swift.Error> = {
         return Result(catching: {
-            let toolchain = try self.getToolchain()
+            let toolchain = try self.getDestinationToolchain()
             let triple = toolchain.triple
 
             // Use "apple" as the subdirectory because in theory Xcode build system
@@ -788,7 +801,7 @@ public class SwiftTool {
                 xcbuildFlags: options.build.xcbuildFlags,
                 jobs: options.build.jobs ?? UInt32(ProcessInfo.processInfo.activeProcessorCount),
                 shouldLinkStaticSwiftStdlib: options.linker.shouldLinkStaticSwiftStdlib,
-                canRenameEntrypointFunctionName: SwiftTargetBuildDescription.checkSupportedFrontendFlags(
+                canRenameEntrypointFunctionName: DriverSupport.checkSupportedFrontendFlags(
                     flags: ["entry-point-function-name"], fileSystem: self.fileSystem
                 ),
                 sanitizers: options.build.enabledSanitizers,
@@ -872,11 +885,11 @@ public class SwiftTool {
 
             var extraManifestFlags = self.options.build.manifestFlags
             // Disable the implicit concurrency import if the compiler in use supports it to avoid warnings if we are building against an older SDK that does not contain a Concurrency module.
-            if SwiftTargetBuildDescription.checkSupportedFrontendFlags(flags: ["disable-implicit-concurrency-module-import"], fileSystem: self.fileSystem) {
+            if DriverSupport.checkSupportedFrontendFlags(flags: ["disable-implicit-concurrency-module-import"], fileSystem: self.fileSystem) {
                 extraManifestFlags += ["-Xfrontend", "-disable-implicit-concurrency-module-import"]
             }
             // Disable the implicit string processing import if the compiler in use supports it to avoid warnings if we are building against an older SDK that does not contain a StringProcessing module.
-            if SwiftTargetBuildDescription.checkSupportedFrontendFlags(flags: ["disable-implicit-string-processing-module-import"], fileSystem: self.fileSystem) {
+            if DriverSupport.checkSupportedFrontendFlags(flags: ["disable-implicit-string-processing-module-import"], fileSystem: self.fileSystem) {
                 extraManifestFlags += ["-Xfrontend", "-disable-implicit-string-processing-module-import"]
             }
 
@@ -919,11 +932,11 @@ private func findPackageRoot(fileSystem: FileSystem) -> AbsolutePath? {
 }
 
 /// Returns the build path from the environment, if present.
-private func getEnvBuildPath(workingDir: AbsolutePath) -> AbsolutePath? {
+private func getEnvBuildPath(workingDir: AbsolutePath) throws -> AbsolutePath? {
     // Don't rely on build path from env for SwiftPM's own tests.
     guard ProcessEnv.vars["SWIFTPM_TESTS_MODULECACHE"] == nil else { return nil }
     guard let env = ProcessEnv.vars["SWIFTPM_BUILD_DIR"] else { return nil }
-    return AbsolutePath(env, relativeTo: workingDir)
+    return try AbsolutePath(validating: env, relativeTo: workingDir)
 }
 
 
@@ -936,7 +949,7 @@ private func getSharedSecurityDirectory(options: GlobalOptions, fileSystem: File
         return explicitSecurityDirectory
     } else {
         // further validation is done in workspace
-        return fileSystem.swiftPMSecurityDirectory
+        return try fileSystem.swiftPMSecurityDirectory
     }
 }
 
@@ -949,7 +962,7 @@ private func getSharedConfigurationDirectory(options: GlobalOptions, fileSystem:
         return explicitConfigurationDirectory
     } else {
         // further validation is done in workspace
-        return fileSystem.swiftPMConfigurationDirectory
+        return try fileSystem.swiftPMConfigurationDirectory
     }
 }
 
@@ -962,7 +975,7 @@ private func getSharedCacheDirectory(options: GlobalOptions, fileSystem: FileSys
         return explicitCacheDirectory
     } else {
         // further validation is done in workspace
-        return fileSystem.swiftPMCacheDirectory
+        return try fileSystem.swiftPMCacheDirectory
     }
 }
 

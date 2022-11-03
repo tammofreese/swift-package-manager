@@ -60,29 +60,57 @@ public struct Destination: Encodable, Equatable {
     public var binDir: AbsolutePath
 
     /// Additional flags to be passed to the C compiler.
-    public let extraCCFlags: [String]
+    @available(*, deprecated, message: "use `extraFlags.cCompilerFlags` instead")
+    public var extraCCFlags: [String] {
+        extraFlags.cCompilerFlags
+    }
 
     /// Additional flags to be passed to the Swift compiler.
-    public let extraSwiftCFlags: [String]
-
-    /// Additional flags to be passed when compiling with C++.
-    public let extraCPPFlags: [String]
+    @available(*, deprecated, message: "use `extraFlags.swiftCompilerFlags` instead")
+    public var extraSwiftCFlags: [String] {
+        extraFlags.swiftCompilerFlags
+    }
+    
+    /// Additional flags to be passed to the C++ compiler.
+    @available(*, deprecated, message: "use `extraFlags.cxxCompilerFlags` instead")
+    public var extraCPPFlags: [String] {
+        extraFlags.cxxCompilerFlags
+    }
+    
+    /// Additional flags to be passed to the build tools.
+    public let extraFlags: BuildFlags
 
     /// Creates a compilation destination with the specified properties.
+    @available(*, deprecated, message: "use `init(target:sdk:binDir:extraFlags)` instead")
     public init(
         target: Triple? = nil,
         sdk: AbsolutePath?,
         binDir: AbsolutePath,
         extraCCFlags: [String] = [],
         extraSwiftCFlags: [String] = [],
-        extraCPPFlags: [String] = []
+        extraCPPFlags: [String]
     ) {
         self.target = target
         self.sdk = sdk
         self.binDir = binDir
-        self.extraCCFlags = extraCCFlags
-        self.extraSwiftCFlags = extraSwiftCFlags
-        self.extraCPPFlags = extraCPPFlags
+        self.extraFlags = BuildFlags(
+            cCompilerFlags: extraCCFlags,
+            cxxCompilerFlags: extraCPPFlags,
+            swiftCompilerFlags: extraSwiftCFlags
+        )
+    }
+    
+    /// Creates a compilation destination with the specified properties.
+    public init(
+        target: Triple? = nil,
+        sdk: AbsolutePath?,
+        binDir: AbsolutePath,
+        extraFlags: BuildFlags = BuildFlags()
+    ) {
+        self.target = target
+        self.sdk = sdk
+        self.binDir = binDir
+        self.extraFlags = extraFlags
     }
 
     /// Returns the bin directory for the host.
@@ -96,7 +124,7 @@ public struct Destination: Encodable, Equatable {
         guard let cwd = originalWorkingDirectory else {
             return try AbsolutePath(validating: CommandLine.arguments[0]).parentDirectory
         }
-        return AbsolutePath(CommandLine.arguments[0], relativeTo: cwd).parentDirectory
+        return try AbsolutePath(validating: CommandLine.arguments[0], relativeTo: cwd).parentDirectory
     }
 
     /// The destination describing the host OS.
@@ -129,7 +157,7 @@ public struct Destination: Encodable, Equatable {
             guard !sdkPathStr.isEmpty else {
                 throw DestinationError.invalidInstallation("default SDK not found")
             }
-            sdkPath = AbsolutePath(sdkPathStr)
+            sdkPath = try AbsolutePath(validating: sdkPathStr)
         }
 #else
         sdkPath = nil
@@ -139,7 +167,7 @@ public struct Destination: Encodable, Equatable {
         var extraCCFlags: [String] = []
         var extraSwiftCFlags: [String] = []
 #if os(macOS)
-        if let sdkPaths = Destination.sdkPlatformFrameworkPaths(environment: environment) {
+        if let sdkPaths = try Destination.sdkPlatformFrameworkPaths(environment: environment) {
             extraCCFlags += ["-F", sdkPaths.fwk.pathString]
             extraSwiftCFlags += ["-F", sdkPaths.fwk.pathString]
             extraSwiftCFlags += ["-I", sdkPaths.lib.pathString]
@@ -155,16 +183,14 @@ public struct Destination: Encodable, Equatable {
             target: nil,
             sdk: sdkPath,
             binDir: binDir,
-            extraCCFlags: extraCCFlags,
-            extraSwiftCFlags: extraSwiftCFlags,
-            extraCPPFlags: []
+            extraFlags: BuildFlags(cCompilerFlags: extraCCFlags, swiftCompilerFlags: extraSwiftCFlags)
         )
     }
 
     /// Returns macosx sdk platform framework path.
     public static func sdkPlatformFrameworkPaths(
         environment: EnvironmentVariables = .process()
-    ) -> (fwk: AbsolutePath, lib: AbsolutePath)? {
+    ) throws -> (fwk: AbsolutePath, lib: AbsolutePath)? {
         if let path = _sdkPlatformFrameworkPath {
             return path
         }
@@ -174,11 +200,11 @@ public struct Destination: Encodable, Equatable {
 
         if let platformPath = platformPath, !platformPath.isEmpty {
             // For XCTest framework.
-            let fwk = AbsolutePath(platformPath).appending(
+            let fwk = try AbsolutePath(validating: platformPath).appending(
                 components: "Developer", "Library", "Frameworks")
 
             // For XCTest Swift library.
-            let lib = AbsolutePath(platformPath).appending(
+            let lib = try AbsolutePath(validating: platformPath).appending(
                 components: "Developer", "usr", "lib")
 
             _sdkPlatformFrameworkPath = (fwk, lib)
@@ -197,10 +223,7 @@ public struct Destination: Encodable, Equatable {
             return Destination(
                 target: triple,
                 sdk: wasiSysroot,
-                binDir: host.binDir,
-                extraCCFlags: [],
-                extraSwiftCFlags: [],
-                extraCPPFlags: []
+                binDir: host.binDir
             )
         }
         return nil
@@ -221,9 +244,12 @@ extension Destination {
             target: destination.target.map{ try Triple($0) },
             sdk: destination.sdk,
             binDir: destination.binDir,
-            extraCCFlags: destination.extraCCFlags,
-            extraSwiftCFlags: destination.extraSwiftCFlags,
-            extraCPPFlags: destination.extraCPPFlags
+            extraFlags: BuildFlags(
+                cCompilerFlags: destination.extraCCFlags,
+                // maintaining `destination.extraCPPFlags` naming inconsistency for compatibility.
+                cxxCompilerFlags: destination.extraCPPFlags,
+                swiftCompilerFlags: destination.extraSwiftCFlags
+            )
         )
     }
 }

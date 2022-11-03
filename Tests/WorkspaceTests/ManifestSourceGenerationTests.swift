@@ -19,6 +19,21 @@ import TSCBasic
 import Workspace
 import XCTest
 
+extension String {
+    fileprivate func nativePathString(escaped: Bool) -> String {
+#if _runtime(_ObjC)
+        return self
+#else
+        let fsr = self.fileSystemRepresentation
+        defer { fsr.deallocate() }
+        if escaped {
+            return String(cString: fsr).replacingOccurrences(of: "\\", with: "\\\\")
+        }
+        return String(cString: fsr)
+#endif
+    }
+}
+
 class ManifestSourceGenerationTests: XCTestCase {
 
     /// Private function that writes the contents of a package manifest to a temporary package directory and then loads it, then serializes the loaded manifest back out again and loads it once again, after which it compares that no information was lost. Return the source of the newly generated manifest.
@@ -36,7 +51,7 @@ class ManifestSourceGenerationTests: XCTestCase {
             // Write the original manifest file contents, and load it.
             let manifestPath = packageDir.appending(component: Manifest.filename)
             try fs.writeFileContents(manifestPath, string: manifestContents)
-            let manifestLoader = ManifestLoader(toolchain: UserToolchain.default)
+            let manifestLoader = ManifestLoader(toolchain: try UserToolchain.default)
             let identityResolver = DefaultIdentityResolver()
             let manifest = try tsc_await {
                 manifestLoader.load(
@@ -237,6 +252,12 @@ class ManifestSourceGenerationTests: XCTestCase {
             // swift-tools-version:5.4
             import PackageDescription
 
+            #if os(Windows)
+            let absolutePath = "file:///C:/Users/user/SourceCache/path/to/MyPkg16"
+            #else
+            let absolutePath = "file:///path/to/MyPkg16"
+            #endif
+
             let package = Package(
                 name: "MyPackage",
                 dependencies: [
@@ -254,16 +275,16 @@ class ManifestSourceGenerationTests: XCTestCase {
                    .package(path: "~MyPkg14"),
                    .package(path: "~/path/to/~/MyPkg15"),
                    .package(path: "~"),
-                   .package(path: "file:///path/to/MyPkg16"),
+                   .package(path: absolutePath),
                 ]
             )
             """
         let newContents = try testManifestWritingRoundTrip(manifestContents: manifestContents, toolsVersion: .v5_3)
-        
+
         // Check some things about the contents of the manifest.
-        XCTAssertTrue(newContents.contains("url: \"../MyPkg10\""), newContents)
-        XCTAssertTrue(newContents.contains("path: \"../MyPkg11\""), newContents)
-        XCTAssertTrue(newContents.contains("path: \"packages/path/to/MyPkg12"), newContents)
+        XCTAssertTrue(newContents.contains("url: \"\("../MyPkg10".nativePathString(escaped: true))\""), newContents)
+        XCTAssertTrue(newContents.contains("path: \"\("../MyPkg11".nativePathString(escaped: true))\""), newContents)
+        XCTAssertTrue(newContents.contains("path: \"\("packages/path/to/MyPkg12".nativePathString(escaped: true))"), newContents)
     }
 
     func testResources() throws {
@@ -404,11 +425,11 @@ class ManifestSourceGenerationTests: XCTestCase {
 
     func testCustomProductSourceGeneration() throws {
         // Create a manifest containing a product for which we'd like to do custom source fragment generation.
-        let packageDir = AbsolutePath("/tmp/MyLibrary")
+        let packageDir = AbsolutePath(path: "/tmp/MyLibrary")
         let manifest = Manifest(
             displayName: "MyLibrary",
             path: packageDir.appending(component: "Package.swift"),
-            packageKind: .root(AbsolutePath("/tmp/MyLibrary")),
+            packageKind: .root(AbsolutePath(path: "/tmp/MyLibrary")),
             packageLocation: packageDir.pathString,
             platforms: [],
             toolsVersion: .v5_5,
@@ -444,11 +465,11 @@ class ManifestSourceGenerationTests: XCTestCase {
     func testModuleAliasGeneration() throws {
         let manifest = Manifest.createRootManifest(
             name: "thisPkg",
-            path: .init("/thisPkg"),
+            path: .init(path: "/thisPkg"),
             toolsVersion: .v5_7,
             dependencies: [
-                .localSourceControl(path: .init("/fooPkg"), requirement: .upToNextMajor(from: "1.0.0")),
-                .localSourceControl(path: .init("/barPkg"), requirement: .upToNextMajor(from: "2.0.0")),
+                .localSourceControl(path: .init(path: "/fooPkg"), requirement: .upToNextMajor(from: "1.0.0")),
+                .localSourceControl(path: .init(path: "/barPkg"), requirement: .upToNextMajor(from: "2.0.0")),
             ],
             targets: [
                 try TargetDescription(name: "exe",
